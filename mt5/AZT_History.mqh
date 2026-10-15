@@ -101,7 +101,7 @@ void RunHistoricalAnalysis(bool draw=true) {
    if(draw) LastSignalBar=0;
    for(int shift=oldest;shift>=1;shift--) {
       LocalSignal signal; string reason;
-      if(!EvaluateSignal(shift,signal,reason)) continue;
+      if(!EvaluateSignal(shift,signal,reason) || !StrictChecks(shift,signal,reason)) continue;
       if(previousSignalShift>=shift && previousSignalShift-shift<CooldownBars) continue;
       previousSignalShift=shift;
       HistoricalSignals++;

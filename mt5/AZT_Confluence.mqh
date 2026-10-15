@@ -68,15 +68,18 @@ int LastPivot(int shift, bool high, int startFrom=0) {
    return -1;
 }
 
+int ConfluenceAgainst=0; // Opposing factors of the last EvaluateConfluence call
+
 void AddFactor(string &text, int &score, int vote, string label) {
    score+=vote;
+   if(vote<0) ConfluenceAgainst++;
    text+="\n"+(vote>0 ? "✅ " : vote<0 ? "⚠️ " : "• ")+label;
 }
 
 // Scores the setup. Returns false (with `blocker`) when a strong opposing
 // level sits between entry and TP1 and BlockIfLevelBeforeTP1 is on.
 bool EvaluateConfluence(int shift, int side, double entry, double sl, int &score, string &factors, string &blocker) {
-   score=0; factors=""; blocker="";
+   score=0; factors=""; blocker=""; ConfluenceAgainst=0;
    double atr=ArrayAt(ATR,shift);
    if(atr==EMPTY_VALUE || atr<=0) return true;
    double risk=MathAbs(entry-sl), tp1=entry+side*risk*TP1_R;

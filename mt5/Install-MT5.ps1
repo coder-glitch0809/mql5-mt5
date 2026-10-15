@@ -5,7 +5,7 @@
         (Join-Path $PSScriptRoot '..\server\.env'))
 )
 # Installs AI Zone Trader into MetaTrader 5:
-#   MQL5\Experts\AI_Zone_Trader\  <- EA (.ex5) and its source modules
+#   MQL5\Experts\AI_Zone_Trader\  <- EA source modules, compiled here with the terminal's MetaEditor
 #   MQL5\Files\AZT_Config.ini     <- Telegram token/chat and Claude API keys (private)
 # Old copies (Experts root, AZT_Telegram.ini, old preset) are moved to MQL5\Files\AZT_Backup_*.
 # Secret values are never printed.
@@ -25,7 +25,8 @@ $resolved = (Resolve-Path -LiteralPath $TerminalDataPath).Path
 if (-not (Test-Path -LiteralPath (Join-Path $resolved 'MQL5') -PathType Container)) {
     throw 'Target must be an existing MT5 data folder containing MQL5.'
 }
-$artifacts = @('AI_Zone_Trader_EA.ex5','AI_Zone_Trader_EA.mq5','AZT_Structure.mqh','AZT_History.mqh',
+# Sources only: the .ex5 is always rebuilt from them (step 2b), so it can never be stale.
+$artifacts = @('AI_Zone_Trader_EA.mq5','AZT_Structure.mqh','AZT_History.mqh',
                'AZT_Telegram.mqh','AZT_Json.mqh','AZT_AI.mqh','AZT_Journal.mqh','AZT_Confluence.mqh','AZT_SignalImage.mqh')
 foreach ($file in $artifacts) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw "Missing file: $file" }
@@ -52,6 +53,31 @@ foreach ($file in $artifacts) {
     $target = Join-Path $experts $file
     if (Test-Path -LiteralPath $target) { Copy-Item -LiteralPath $target -Destination (Join-Path $backup $file) -Force }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $target -Force
+}
+
+# 2b. Compile with the MetaEditor of this terminal (origin.txt holds its install folder).
+$oldBinary = Join-Path $experts 'AI_Zone_Trader_EA.ex5'
+if (Test-Path -LiteralPath $oldBinary) { Move-Item -LiteralPath $oldBinary -Destination (Join-Path $backup 'AI_Zone_Trader_EA.ex5') -Force }
+$compiled = $false
+$origin = Join-Path $resolved 'origin.txt'
+$metaEditor = $null
+if (Test-Path -LiteralPath $origin) {
+    $installDir = [IO.File]::ReadAllText($origin).Trim([char]0xFEFF, ' ', "`r", "`n")
+    $metaEditor = Join-Path $installDir 'metaeditor64.exe'
+}
+if ($metaEditor -and (Test-Path -LiteralPath $metaEditor)) {
+    $source = Join-Path $experts 'AI_Zone_Trader_EA.mq5'
+    $log = Join-Path $experts 'AI_Zone_Trader_EA.compile.log'
+    Start-Process -FilePath $metaEditor -ArgumentList "/compile:`"$source`"", "/log:`"$log`"" -Wait -NoNewWindow
+    $compiled = Test-Path -LiteralPath $oldBinary
+    $summary = if (Test-Path -LiteralPath $log) { (Get-Content -LiteralPath $log -Encoding Unicode | Select-String 'result') -join ' ' } else { '' }
+    if ($compiled) { Write-Output "Compiled:         AI_Zone_Trader_EA.ex5 $summary" }
+    else {
+        Write-Output "COMPILE FAILED:   see $log"
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding Unicode | Select-String 'error' | Select-Object -First 15 | ForEach-Object { Write-Output "  $_" } }
+    }
+} else {
+    Write-Output 'MetaEditor not found: open AI_Zone_Trader_EA.mq5 in MetaEditor and press F7 (Compile).'
 }
 
 # 3. Build AZT_Config.ini. Priority: existing AZT_Config.ini > old AZT_Telegram.ini > legacy .env files.
@@ -103,7 +129,7 @@ CLAUDE_MODEL=$($values['CLAUDE_MODEL'])
 [IO.File]::WriteAllText($config, $text, [Text.UTF8Encoding]::new($false))
 if (Test-Path -LiteralPath $oldTelegram) { Move-Item -LiteralPath $oldTelegram -Destination (Join-Path $backup 'AZT_Telegram.ini') -Force }
 
-Write-Output "EA installed:     $experts"
+Write-Output "EA installed:     $experts$(if (-not $compiled) { '  (NOT compiled yet - press F7 in MetaEditor)' })"
 Write-Output "Settings file:    $config"
 foreach ($key in @('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','CLAUDE_API_KEY')) {
     $state = if ($values.ContainsKey($key)) { 'filled' } else { 'EMPTY - fill it in' }
@@ -112,4 +138,5 @@ foreach ($key in @('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','CLAUDE_API_KEY')) {
 Write-Output "Old copies moved: $backup"
 Write-Output 'Next in MT5: Tools > Options > Expert Advisors > Allow WebRequest for:'
 Write-Output '  https://api.telegram.org   https://api.anthropic.com'
-Write-Output 'Then: Navigator > Expert Advisors > Refresh > AI_Zone_Trader > AI_Zone_Trader_EA onto a chart.'
+Write-Output 'Then: Navigator > Expert Advisors > Refresh > AI_Zone_Trader > AI_Zone_Trader_EA onto ONE chart per symbol.'
+Write-Output 'One chart scans M5, M15, M30, H1, H4 and D1 (input ScanTimeframes).'

@@ -47,8 +47,8 @@ void QueueSignalImage(const LocalSignal &signal,const string key) {
    AZTLevel levels[]; BuildLevels(1,signal.atr,levels);
    for(int i=0;i<MathMin(6,ArraySize(levels));i++)
       AZTImageLevel(chart,"SNR "+(string)levels[i].touches+"x",levels[i].price,clrSlateGray);
-   // Copy only the strategy's trend lines, never account/UI objects.
-   for(int i=0;i<ObjectsTotal(0);i++) {
+   // Copy only the strategy's trend lines (drawn for the chart's own timeframe), never account/UI objects.
+   for(int i=0;DrawEnabled && i<ObjectsTotal(0);i++) {
       string name=ObjectName(0,i);
       if(StringFind(name,Prefix)!=0 || ObjectGetInteger(0,name,OBJPROP_TYPE)!=OBJ_TREND) continue;
       ObjectCreate(chart,name,OBJ_TREND,0,(datetime)ObjectGetInteger(0,name,OBJPROP_TIME,0),ObjectGetDouble(0,name,OBJPROP_PRICE,0),

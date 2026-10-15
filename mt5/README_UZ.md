@@ -1,18 +1,36 @@
-﻿# AI Zone Trader — MT5 qo'llanma
+﻿# AI Zone Trader 5 — MT5 qo'llanma
 
 Hamma narsa MetaTrader 5 ichida ishlaydi. Server, TradingView yoki Python
-kerak emas. EA o'zi signal topadi, Claude'dan fikr so'raydi,
-Telegram'ga yuboradi, kerak bo'lsa sizdan tasdiq oladi va savdoni 3 qismda
-boshqaradi.
+kerak emas. EA o'zi signal topadi, uni barcha qoidalar va yuqori
+timeframe'lar bilan tekshiradi, Claude'ga tekshirtiradi va **faqat hamma
+tekshiruvdan o'tgan** signalni Telegram'ga yuboradi.
+
+## 0. Versiya 5 da nima yangi
+
+| | |
+|---|---|
+| **Barcha timeframe'lar** | Bitta chart (masalan EURUSD) **M5, M15, M30, H1, H4, D1** ni bir vaqtda skanerlaydi (`ScanTimeframes`). Har bir TF'ning jurnali, statistikasi va Claude xotirasi alohida. |
+| **Yuqori TF tekshiruvi** | Signal faqat undan yuqori TF'lar trendi qarshi bo'lmasa chiqadi (masalan M15 BUY uchun H1, H4, D1 pastga qaramasligi kerak). `MTFFilter`, `MTFMinAgreePercent`. |
+| **Barcha omillar** | Konfluensda bitta ham ⚠️ qarshi omil bo'lsa (qarshi FVG, TP1 oldidagi daraja, MACD, MA200...) signal chiqmaydi. `RequireAllChecks`. |
+| **Claude tekshiruvi majburiy** | Signal Telegram'ga faqat Claude `APPROVE` va ishonch ≥ 70% bo'lsa boradi (`RequireAIApproval`, `MinAIConfidence`). Rad etilganlari yuborilmaydi, lekin natijasi kuzatilib, Claude xotirasiga yoziladi. Rasm ham faqat tasdiqlangan signalga. |
+| **Standart rejim** | `AZT_SIGNALS_ONLY`: faqat signal, savdo ochilmaydi. Savdo kerak bo'lsa `TradeMode` ni o'zgartiring (4-bo'lim). |
+| **"EA ishlayapti" xabari** | Ishga tushganda va har 6 soatda (`HeartbeatHours`) Telegram'ga holat: har bir TF tayyormi, hozirgi trendlar, nechta setup topildi / yuborildi / Claude o'tkazmadi. |
+| **Claude ishlamasa** | Telegram'ga soatiga bir marta ogohlantirish keladi; tekshirilmagan signal yuborilmaydi. |
+| **Ali bilan ulanish** | Har bir signal `MQL5\Files\AZT_signals_v5.csv` ga yoziladi (Claude qarori bilan). Ali'ning Treyder agenti uni o'qiydi. |
+
+**Muhim:** EA'ni har bir symbol uchun **bitta** chartga qo'ying (EURUSD, XAUUSD...). Bir symbolni bir nechta
+TF chartga qo'ymang — endi bitta chart barcha TF'larni o'zi ko'radi, aks holda signallar takrorlanadi.
 
 ## 1. MT5 ga nima qo'yiladi (aniq ro'yxat)
 
 | Fayl | MT5 ichidagi joyi | Nima uchun |
 |---|---|---|
-| `AI_Zone_Trader_EA.ex5` + `AI_Zone_Trader_EA.mq5` + 6 ta `AZT_*.mqh` | `MQL5\Experts\AI_Zone_Trader\` | Robotning o'zi |
+| `AI_Zone_Trader_EA.mq5` + 8 ta `AZT_*.mqh` (o'rnatishda `AI_Zone_Trader_EA.ex5` ga kompilyatsiya qilinadi) | `MQL5\Experts\AI_Zone_Trader\` | Robotning o'zi |
 | `AZT_Config.ini` | `MQL5\Files\` | **Barcha kalitlar shu yerda:** Telegram token, chat ID, Claude API kalitlari |
 
-Boshqa hech narsa kerak emas. Buni `Install-MT5.ps1` avtomatik qiladi:
+Boshqa hech narsa kerak emas. Buni `Install-MT5.ps1` avtomatik qiladi (MT5 ning o'z MetaEditor'i bilan
+kompilyatsiya ham qiladi; natija `Compiled:` yoki `COMPILE FAILED` qatorida chiqadi). MetaEditor topilmasa:
+`AI_Zone_Trader_EA.mq5` ni MetaEditor'da oching va **F7** bosing — "0 errors" bo'lishi kerak.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\mt5\Install-MT5.ps1
@@ -47,7 +65,9 @@ EA inputlarida kalit kiritiladigan joy **yo'q** — chalkashlik bo'lmasligi uchu
      - `https://api.anthropic.com`
 2. Tepadagi **Algo Trading** tugmasi yashil bo'lsin.
 3. **Navigator → Expert Advisors → Refresh → AI_Zone_Trader → AI_Zone_Trader_EA**
-   ni kerakli symbol chartiga (masalan EURUSD M15) torting. Inputs'da **Reset** bosing.
+   ni kerakli symbol chartiga (masalan EURUSD, istalgan TF) torting. Inputs'da **Reset** bosing.
+   Chart qaysi TF'da bo'lsa, grafikda o'sha TF'ning order bloklari va signallari chiziladi; signallar esa
+   `ScanTimeframes` dagi barcha TF'lardan keladi. Bir necha symbol kerak bo'lsa — har biriga bitta chart.
 4. Chartning o'ng tomonidagi tugmalar:
    - **Telegram TEST (once)** — Telegram'ga test xabar keladi.
    - **AI TEST (Claude)** — Claude ulanganini tekshiradi; natija panelda
@@ -58,9 +78,9 @@ EA inputlarida kalit kiritiladigan joy **yo'q** — chalkashlik bo'lmasligi uchu
 
 | Rejim | Nima bo'ladi |
 |---|---|
-| `AZT_AI_HYBRID` (standart) | Claude `APPROVE` va ishonch ≥ 75% → EA **o'zi kiradi**. ishonch past bo'lsa yoki AI javob bermasa → Telegram'da **✅ KIRISH / ❌ BEKOR**, siz bosmaguncha savdo yo'q. |
+| `AZT_SIGNALS_ONLY` (standart) | Faqat tekshirilgan signal va tahlil, savdo umuman ochilmaydi. |
+| `AZT_AI_HYBRID` | Claude `APPROVE` va ishonch ≥ 75% → EA **o'zi kiradi**. ishonch past bo'lsa yoki AI javob bermasa → Telegram'da **✅ KIRISH / ❌ BEKOR**, siz bosmaguncha savdo yo'q. |
 | `AZT_CONFIRM_EVERY` | Har bir savdo faqat sizning tugmangiz bilan. Sinov davri uchun eng xavfsiz. |
-| `AZT_SIGNALS_ONLY` | Faqat signal va tahlil, savdo umuman ochilmaydi. |
 
 - AI rad etsa (`SkipWhenAIRejects=true`) — savdo ham, tugma ham yo'q, faqat izoh keladi.
 - 15 daqiqada javob bermasangiz signal bekor (`ApprovalTimeoutMinutes`).
@@ -103,7 +123,9 @@ Foizlar va darajalar `3. Stop loss va 3 qismli take profit` inputlarida o'zgarti
 
 ## 7. Telegram'ga nima keladi
 
-1. **📊 SIGNAL** — yo'nalish, setup, Entry, SL (pt/pips), TP1/TP2/TP3 narxlari
+0. **🟢 EA ISHGA TUSHDI / 🫀 EA ISHLAYAPTI** — holat va statistika (6 soatda bir).
+1. **📊 SIGNAL** (faqat tekshiruvdan o'tgani, `✅ TEKSHIRUVDAN O'TDI` bilan boshlanadi) — timeframe,
+   yo'nalish, setup, Entry, SL (pt/pips), TP1/TP2/TP3 narxlari
    va qancha yopilishi, lot, risk ($ va %), kutilgan foyda, H4/D1 trendi, RSI,
    Claude xulosasi (o'zbekcha) va ishonch foizi.
 2. Kerak bo'lsa **✅ KIRISH / ❌ BEKOR** tugmalari.
@@ -132,7 +154,14 @@ ketma-ket SL bo'lishi normal holat.
 
 ## 9. Signal qoidalari (qisqacha)
 
-Faqat yopilgan sham. Trend: EMA21 > EMA55 va narx EMA21 ustida (BUY), RSI 50–70;
+Har bir TF uchun alohida, faqat yopilgan sham. Signal yuborilishi uchun **hammasi** bajarilishi kerak:
+1. Asosiy qoida (pastda) va konfluens bali ≥ `MinConfluence`;
+2. Konfluensda qarshi ⚠️ omil yo'q (`RequireAllChecks`);
+3. Yuqori TF'lar qarshi emas va kamida 50%i mos (`MTFFilter`);
+4. Claude `APPROVE`, ishonch ≥ 70% (`RequireAIApproval`).
+
+Tarixiy statistika (panel "History") ham 1–3 qoidalar bilan hisoblanadi.
+ Trend: EMA21 > EMA55 va narx EMA21 ustida (BUY), RSI 50–70;
 SELL uchun teskari, RSI 30–50. Kirish turlari: yangi order blokdan qaytish,
 BOS/CHOCH impulsi, trend chizig'idan qaytish, EMA kesishishi yoki EMA'ga qaytish.
 Grafikda order bloklar, trend chiziqlari, BOS/CHOCH belgilari va Entry/SL/TP
@@ -148,6 +177,9 @@ chiziqlari chiziladi. Tarixiy signallar faqat statistikaga kiradi, order ochmayd
 | `Limit/balans tugagan (HTTP 429)` | Provayder hisobini to'ldiring |
 | `getUpdates 409` | Bot webhook'ga ulangan: brauzerda bir marta `https://api.telegram.org/bot<TOKEN>/deleteWebhook` |
 | `Algo Trading ... O'CHIQ` | Tepadagi Algo Trading tugmasini yoqing |
+| `COMPILE FAILED` (o'rnatishda) | Log'dagi xatoni yuboring yoki MetaEditor'da F7 bosib xatolar ro'yxatini ko'ring |
+| Signal umuman kelmayapti | Normal: qat'iy rejimda signal kam. Panel'da har bir TF sababi yoziladi ("yuqori timeframe qarshi", "Claude rad etdi"...). Ko'proq signal uchun `MinAIConfidence` ni 60 ga yoki `RequireAllChecks=false` qiling |
+| `Claude signalni tekshira olmadi` | AI TEST tugmasini bosing: kalit, balans yoki WebRequest ruxsati |
 | `Hisob kichik: eng kichik lot riski ...` | SL juda katta yoki hisob juda kichik: kichikroq timeframe/symbol yoki `MinLotMaxRiskPercent` |
 
 Strategy Tester'da AI va Telegram ishlamaydi; u yerda order faqat qoidalar

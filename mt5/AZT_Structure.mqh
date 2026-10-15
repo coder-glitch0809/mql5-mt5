@@ -269,10 +269,11 @@ bool EvaluateStructureSignal(int shift,int &side,string &setup,double &stopAncho
 }
 
 void RebuildStructure() {
-   ObjectsDeleteAll(0,Prefix+"STRUCT_");
-   BuildStructureCache(true);
+   // Only the chart's own timeframe draws; other scanned timeframes just compute.
+   if(DrawEnabled) ObjectsDeleteAll(0,Prefix+"STRUCT_");
+   BuildStructureCache(DrawEnabled);
    if(ArraySize(Rates)<2) { StructureStatus="Waiting for history"; return; }
-   if(DrawTrendlines) {
+   if(DrawTrendlines && DrawEnabled) {
       Trendline(Prefix+"STRUCT_RESISTANCE",PreviousHigh,HighPivot,clrTomato);
       Trendline(Prefix+"STRUCT_SUPPORT",PreviousLow,LowPivot,clrDeepSkyBlue);
    }
@@ -280,7 +281,7 @@ void RebuildStructure() {
    int fresh=0, touched=0;
    for(int i=0;i<ArraySize(Blocks);i++) {
       if(Blocks[i].touched) touched++; else fresh++;
-      if(!DrawOrderBlocks) continue;
+      if(!DrawOrderBlocks || !DrawEnabled) continue;
       string name=Prefix+"STRUCT_OB_"+(string)i;
       color colour=Blocks[i].touched ? clrSlateGray : Blocks[i].side==1 ? clrSeaGreen : clrIndianRed;
       ObjectCreate(0,name,OBJ_RECTANGLE,0,Blocks[i].origin,Blocks[i].top,right,Blocks[i].bottom);
@@ -294,6 +295,6 @@ void RebuildStructure() {
    }
    StructureStatus="OB fresh="+(string)fresh+" touched="+(string)touched+" | BOS="+(string)StructureBreakCount+
       " | pivot delay="+(string)PivotBars+" bars";
-   ChartRedraw();
+   if(DrawEnabled) ChartRedraw();
 }
 #endif

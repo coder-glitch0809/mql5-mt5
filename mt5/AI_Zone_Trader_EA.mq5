@@ -1,9 +1,10 @@
 ﻿// AI Zone Trader: everything runs inside MetaTrader 5.
-// Rule-based signals -> Claude review (they learn from their own record)
-// -> Telegram signal / approval buttons -> order with SL and 3-part take profit.
+// One chart scans every timeframe in ScanTimeframes (M5..D1): rule-based signals
+// -> all classic checks + higher-timeframe alignment -> Claude review (it learns from
+// its own record) -> only verified signals go to Telegram -> optional order with SL and 3-part TP.
 #property strict
-#property version "4.00"
-#property description "MT5 signals + Claude review + Telegram approval. SL and 3-part TP (50% at 1.5R, 25% at 2.25R, 25% at 3R)."
+#property version "5.00"
+#property description "Multi-timeframe MT5 signals: every check + Claude review before Telegram. SL and 3-part TP (50% at 1.5R, 25% at 2.25R, 25% at 3R)."
 #include <Trade/Trade.mqh>
 
 enum AZTTradeMode {
@@ -13,7 +14,7 @@ enum AZTTradeMode {
 };
 
 input group "1. Savdo rejimi"
-input AZTTradeMode TradeMode = AZT_AI_HYBRID;
+input AZTTradeMode TradeMode = AZT_SIGNALS_ONLY; // Standart: faqat tekshirilgan signal Telegram'ga, savdo yo'q
 input int ApprovalTimeoutMinutes = 15;  // Javob bo'lmasa signal bekor
 input bool SkipWhenAIRejects = true;    // AI rad etsa: savdo ham, tugma ham yo'q
 
@@ -84,6 +85,15 @@ input int SNRMinTouches = 2;
 input bool UseFibonacci = true;          // 50-78.6% qaytish zonasi
 input bool UsePatterns = true;           // Engulfing, pin bar, double top/bottom
 
+input group "4c. Barcha timeframe'lar va qat'iy tekshiruv"
+input string ScanTimeframes = "M5,M15,M30,H1,H4,D1"; // Bitta chartdan shu TF'lar skanerlanadi (bo'sh = faqat SignalTimeframe)
+input bool MTFFilter = true;             // Yuqori TF trendi signalga qarshi bo'lsa signal yo'q
+input int MTFMinAgreePercent = 50;       // Yuqori TF'larning kamida shuncha %i signal yo'nalishida bo'lsin
+input bool RequireAllChecks = true;      // Konfluensda bitta ham qarshi (⚠️) omil bo'lmasin
+input bool RequireAIApproval = true;     // Faqat Claude APPROVE bergan signal Telegram'ga yuboriladi
+input int MinAIConfidence = 70;          // Claude ishonchi shundan past bo'lsa signal yuborilmaydi
+input int HeartbeatHours = 6;            // Telegram'ga "EA ishlayapti" hisoboti har N soatda (0 = o'chiq)
+
 input group "5. AI uchun kontekst"
 input ENUM_TIMEFRAMES AIHigherTF1 = PERIOD_H4;
 input ENUM_TIMEFRAMES AIHigherTF2 = PERIOD_D1;
@@ -114,6 +124,23 @@ bool Ready=false;
 string Prefix, PosScope, Status="Starting", LastSignal="none", TradeStatus="", AITestStatus="";
 int HistoricalSignals=0;
 
+// ---- Multi-timeframe state ---------------------------------------------------
+// Every timeframe has its own indicator handles and scan state. SwitchTF() loads one
+// timeframe into the globals that the rest of the EA (structure, confluence, journal) reads.
+#define AZT_MAX_TF 9
+int TFCount=0, TFIndex=-1, JournalTF=-1;
+ENUM_TIMEFRAMES TFList[AZT_MAX_TF];
+int TFFast[AZT_MAX_TF], TFSlow[AZT_MAX_TF], TFRSI[AZT_MAX_TF], TFATR[AZT_MAX_TF], TFMACD[AZT_MAX_TF], TFTrendMA[AZT_MAX_TF];
+datetime TFLastClosed[AZT_MAX_TF], TFLastSignal[AZT_MAX_TF];
+bool TFReady[AZT_MAX_TF];
+string TFStatus[AZT_MAX_TF], TFHistory[AZT_MAX_TF];
+int TFHistSignals[AZT_MAX_TF];
+bool DrawEnabled=true;                 // Only the chart's own timeframe draws objects
+int SetupCount=0, SentCount=0, FilteredCount=0; // Since the last heartbeat
+datetime NextHeartbeat=0, NextAIWarning=0, StartedAt=0;
+
+string TFName(ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf),7); }
+
 #include "AZT_Structure.mqh"
 #include "AZT_Telegram.mqh"
 #include "AZT_AI.mqh"
@@ -125,13 +152,16 @@ struct LocalSignal {
    double zoneTop, zoneBottom; // Kirish zonasi: narx shu oraliqda bo'lganda kiriladi
    string setup;
    int score;      // Confluence: agreeing minus opposing classic factors
+   int against;    // Number of opposing (⚠️) factors
    string factors; // One line per factor, for Telegram and the AI
+   string mtf;     // Higher-timeframe trend line
 };
 
 struct PendingApproval {
    bool active;
    string id;
    LocalSignal signal;
+   int tf;           // TFList index of the signal
    datetime expires; // TimeLocal
 };
 PendingApproval Pending;
@@ -219,9 +249,9 @@ bool EvaluateSignal(int shift, LocalSignal &signal, string &reason) {
    signal.tp3=TickPrice(signal.entry+side*distance*TP3_R,side);
    if(signal.sl<=0 || signal.tp3<=0 || distance<=0) { reason="Invalid price levels"; return false; }
    string blocker;
-   if(!EvaluateConfluence(shift,side,signal.entry,signal.sl,signal.score,signal.factors,blocker)) {
-      reason="Skipped "+signal.setup+": "+blocker; return false;
-   }
+   bool clear=EvaluateConfluence(shift,side,signal.entry,signal.sl,signal.score,signal.factors,blocker);
+   signal.against=ConfluenceAgainst; signal.mtf="";
+   if(!clear) { reason="Skipped "+signal.setup+": "+blocker; return false; }
    if(signal.score<MinConfluence) {
       reason="Skipped "+signal.setup+": confluence "+(string)signal.score+" < "+(string)MinConfluence; return false;
    }
@@ -233,6 +263,81 @@ bool CoolingDown(int shift) {
    if(LastSignalBar==0 || CooldownBars==0) return false;
    int previous=iBarShift(_Symbol,TF,LastSignalBar,true);
    return previous>=shift && previous-shift<CooldownBars;
+}
+
+// ---- Multi-timeframe alignment ----------------------------------------------
+// Trend (1 UP, -1 DOWN, 0 MIXED) of TFList[k] on its last bar that was CLOSED at `at`.
+// Causal: a higher-timeframe bar still forming at `at` is never used. word="n/a" if no data.
+int TFTrendAt(int k, datetime at, string &word) {
+   word="n/a";
+   if(k<0 || k>=TFCount || TFFast[k]==INVALID_HANDLE || TFSlow[k]==INVALID_HANDLE) return 0;
+   ENUM_TIMEFRAMES tf=TFList[k];
+   int shift=iBarShift(_Symbol,tf,at-1,false);
+   if(shift<0) return 0;
+   for(int guard=0;guard<3;guard++) {
+      datetime opened=iTime(_Symbol,tf,shift);
+      if(opened<=0) return 0;
+      if(opened+PeriodSeconds(tf)<=at) break;
+      shift++;
+   }
+   double fast[1], slow[1];
+   MqlRates bar[1];
+   if(CopyBuffer(TFFast[k],0,shift,1,fast)!=1 || CopyBuffer(TFSlow[k],0,shift,1,slow)!=1 ||
+      CopyRates(_Symbol,tf,shift,1,bar)!=1 || fast[0]==EMPTY_VALUE || slow[0]==EMPTY_VALUE) return 0;
+   int trend=(fast[0]>slow[0] && bar[0].close>fast[0]) ? 1 : (fast[0]<slow[0] && bar[0].close<fast[0]) ? -1 : 0;
+   word=trend>0 ? "UP" : trend<0 ? "DOWN" : "MIXED";
+   return trend;
+}
+
+string TrendArrow(string word) { return word=="UP" ? "▲" : word=="DOWN" ? "▼" : word=="MIXED" ? "◆" : "?"; }
+
+// All scanned timeframes right now (closed bars), e.g. "M5 ▲ | M15 ▲ | H1 ◆ | H4 ▼".
+string MTFMatrix() {
+   string text="";
+   for(int k=0;k<TFCount;k++) {
+      string word; TFTrendAt(k,TimeCurrent(),word);
+      text+=(k>0 ? " | " : "")+TFName(TFList[k])+" "+TrendArrow(word);
+   }
+   return text;
+}
+
+// Higher-timeframe check for a signal on the current TF whose candle closed at `closedAt`.
+// vote = +1 when every higher timeframe with data agrees. blocker is set when the signal fails.
+void MTFCheck(int side, datetime closedAt, string &line, int &vote, string &blocker) {
+   line=""; vote=0; blocker="";
+   int agree=0, against=0, counted=0;
+   string opposite="";
+   for(int k=0;k<TFCount;k++) {
+      if(PeriodSeconds(TFList[k])<=PeriodSeconds(TF)) continue;
+      string word; int trend=TFTrendAt(k,closedAt,word);
+      line+=(line=="" ? "" : ", ")+TFName(TFList[k])+" "+TrendArrow(word)+word;
+      if(word=="n/a") continue;
+      counted++;
+      if(trend==side) agree++;
+      else if(trend==-side) { against++; opposite+=(opposite=="" ? "" : ", ")+TFName(TFList[k])+" "+word; }
+   }
+   if(counted==0) { line="Yuqori TF: "+(line=="" ? "yo'q (eng yuqori timeframe)" : line+" (ma'lumot yo'q)"); return; }
+   int percent=(int)MathRound(100.0*agree/counted);
+   line="Yuqori TF: "+line+" ("+(string)agree+"/"+(string)counted+" mos)";
+   if(agree==counted) vote=1;
+   if(against>0) blocker="yuqori timeframe qarshi: "+opposite;
+   else if(percent<MTFMinAgreePercent) blocker="yuqori TF'larning faqat "+(string)percent+"%i mos (kerak "+(string)MTFMinAgreePercent+"%)";
+}
+
+// Strict gate after EvaluateSignal: higher-timeframe alignment and no opposing factor.
+// Used for live signals and the history replay, so statistics match what is sent.
+bool StrictChecks(int shift, LocalSignal &signal, string &reason) {
+   string line, blocker;
+   int vote=0;
+   MTFCheck(signal.side,Rates[shift].time+PeriodSeconds(TF),line,vote,blocker);
+   signal.mtf=line;
+   signal.score+=vote;
+   signal.factors+="\n"+(vote>0 ? "✅ " : blocker!="" ? "⚠️ " : "• ")+line;
+   if(MTFFilter && blocker!="") { reason="Skipped "+signal.setup+": "+blocker; return false; }
+   if(RequireAllChecks && signal.against>0) {
+      reason="Skipped "+signal.setup+": "+(string)signal.against+" ta qarshi omil (RequireAllChecks)"; return false;
+   }
+   return true;
 }
 
 // "200 pt = 20.0 pips" (pips only for 3/5-digit quotes, where the term is unambiguous).
@@ -256,6 +361,10 @@ void Level(string suffix, double price, color colour) {
 
 void DrawSignal(const LocalSignal &signal, bool historical) {
    string side=signal.side==1 ? "BUY" : "SELL";
+   LastSignal=(historical ? "History: " : "Live: ")+TFName(TF)+" "+side+" "+TimeToString(signal.time)+
+              " | Entry "+Price(signal.entry)+" SL "+Price(signal.sl)+
+              "\nTP1 "+Price(signal.tp1)+" TP2 "+Price(signal.tp2)+" TP3 "+Price(signal.tp3);
+   if(!DrawEnabled) return;
    string name=Prefix+"S_"+(string)(long)signal.time;
    double at=signal.entry-signal.side*0.3*signal.atr;
    if(ObjectFind(0,name)<0) ObjectCreate(0,name,signal.side==1 ? OBJ_ARROW_BUY : OBJ_ARROW_SELL,0,signal.time,at);
@@ -276,9 +385,6 @@ void DrawSignal(const LocalSignal &signal, bool historical) {
       Level("TP2 "+DoubleToString(TP2ClosePercent,0)+"%",signal.tp2,clrLimeGreen);
       Level("TP3",signal.tp3,clrLimeGreen);
    }
-   LastSignal=(historical ? "History: " : "Live: ")+side+" "+TimeToString(signal.time)+
-              " | Entry "+Price(signal.entry)+" SL "+Price(signal.sl)+
-              "\nTP1 "+Price(signal.tp1)+" TP2 "+Price(signal.tp2)+" TP3 "+Price(signal.tp3);
 }
 
 #include "AZT_History.mqh"
@@ -329,6 +435,8 @@ string BuildAIPrompt(const LocalSignal &signal) {
       " | EMA"+(string)SlowEMA+" "+Price(Slow[1])+" | RSI("+(string)RSIPeriod+") "+DoubleToString(RSI[1],1)+
       " | Spread "+DoubleToString(spread,1)+" points"+
       "\nHigher timeframes: "+HTFTrend(0,AIHigherTF1)+"; "+HTFTrend(1,AIHigherTF2)+
+      "\nMulti-timeframe check (closed bars): "+signal.mtf+
+      "\nAll scanned timeframes now (▲ up, ▼ down, ◆ mixed): "+MTFMatrix()+
       "\nStructure bias: "+BiasWord()+
       " | Last swing high "+(HighPivot.time>0 ? Price(HighPivot.price)+(HighPivot.broken ? " (broken)" : "") : "n/a")+
       " | Last swing low "+(LowPivot.time>0 ? Price(LowPivot.price)+(LowPivot.broken ? " (broken)" : "") : "n/a");
@@ -404,7 +512,7 @@ string SignalText(const LocalSignal &signal, bool volumeOk, double volume, doubl
    int pct3=(int)MathRound(100-TP1ClosePercent-TP2ClosePercent);
    string d1, d2;
    string h1=HTFTrendWord(0,AIHigherTF1,d1), h2=HTFTrendWord(1,AIHigherTF2,d2);
-   string text="📊 SIGNAL | "+_Symbol+" "+StringSubstr(EnumToString(TF),7)+" | "+(signal.side==1 ? "🟢 BUY" : "🔴 SELL")+
+   string text="📊 SIGNAL | "+_Symbol+" "+TFName(TF)+" | "+(signal.side==1 ? "🟢 BUY" : "🔴 SELL")+
       "\nSetup: "+signal.setup+"\nSham yopildi (broker vaqti): "+TimeToString(signal.time)+
       (signal.zoneTop>0 ? "\n🧭 Zona: "+Price(signal.zoneBottom)+" – "+Price(signal.zoneTop)+
                           " (SL zona chegarasidan "+DoubleToString(SLBufferATR,2)+" ATR past)" : "")+
@@ -427,7 +535,8 @@ string SignalText(const LocalSignal &signal, bool volumeOk, double volume, doubl
    } else text+="\n⚠️ Order ochib bo'lmaydi: "+volumeReason;
    text+="\n🧩 TASDIQLAR (konfluens "+(string)signal.score+"):"+signal.factors;
    text+="\n📈 Trend: "+StringSubstr(EnumToString(AIHigherTF1),7)+" "+h1+" | "+StringSubstr(EnumToString(AIHigherTF2),7)+" "+h2+
-         " | RSI "+DoubleToString(RSI[1],1)+" | struktura "+BiasWord();
+         " | RSI "+DoubleToString(RSI[1],1)+" | struktura "+BiasWord()+
+         "\n🕒 Barcha TF: "+MTFMatrix();
    return text;
 }
 
@@ -445,18 +554,23 @@ void Panel() {
       spread=DoubleToString((tick.ask-tick.bid)/_Point,1)+" points";
    string connection=TerminalInfoInteger(TERMINAL_CONNECTED) ? "connected" : "DISCONNECTED";
    if(MQLInfoInteger(MQL_TESTER)) connection="Strategy Tester";
-   Comment("AI Zone Trader 4 | ",_Symbol," ",EnumToString(TF)," | ",connection,
+   SaveTF();
+   string frames="";
+   for(int k=0;k<TFCount;k++) frames+="\n  "+TFName(TFList[k])+": "+TFStatus[k];
+   Comment("AI Zone Trader 5 | ",_Symbol," | TF: ",ScanList()," | ",connection,
       "\nRejim: ",ModeName(),
       "\nRisk: ",DoubleToString(MaxRiskPercent,1),"% | TP: ",DoubleToString(TP1ClosePercent,0),"% @",DoubleToString(TP1_R,2),
       "R, ",DoubleToString(TP2ClosePercent,0),"% @",DoubleToString(TP2_R,2),"R, rest @",DoubleToString(TP3_R,2),"R",
       "\nAI: ",AZTAIStatus(),(AITestStatus!="" ? "\nAI test: "+AITestStatus : ""),
-      "\n",JournalScore(AZT_AI_CLAUDE),
+      "\n",(JournalTF>=0 && JournalTF<TFCount ? "["+TFName(TFList[JournalTF])+"] " : ""),JournalScore(AZT_AI_CLAUDE),
       Pending.active ? "\nTELEGRAM TASDIG'I KUTILMOQDA: "+Pending.id : "",
-      "\n",Status,"\nLast closed candle: ",TimeToString(LastClosedBar),
+      "\nTimeframe'lar:",frames,
+      "\nTekshiruv: ",(RequireAllChecks ? "barcha omillar" : "ball")," + ",(MTFFilter ? "yuqori TF" : "MTF o'chiq"),
+      " + ",(RequireAIApproval ? "Claude APPROVE >= "+(string)MinAIConfidence+"%" : "AI ixtiyoriy"),
       "\nSpread: ",spread," | Order limit: ",DoubleToString(MaxSpreadPoints,1),
       "\nLast signal: ",LastSignal,
-      "\nStructure: ",StructureStatus,
-      "\nHistory: ",HistoryStatus,
+      "\nStructure (",TFName(TF),"): ",StructureStatus,
+      "\nHistory (",TFName(TF),"): ",HistoryStatus,
       "\nTelegram: ",AZTTelegramStatus(),
       "\n",TradeStatus);
 }
@@ -640,29 +754,39 @@ void ReportClosedPositions() {
    }
 }
 
-// Every live signal is appended to MQL5/Files/AZT_signals.csv, so other tools (Ali) can read it.
-void ExportSignal(const LocalSignal &signal) {
-   int h=FileOpen("AZT_signals.csv",FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+// Every live signal (sent or filtered) is appended to MQL5/Files/AZT_signals_v5.csv, so other tools (Ali) can read it.
+// ai = APPROVE / REJECT / NONE, sent = 1 when it reached Telegram as a verified signal.
+string CsvClean(string value) { StringReplace(value,","," "); StringReplace(value,"\n"," "); StringReplace(value,"\r"," "); return value; }
+
+void ExportSignal(const LocalSignal &signal, string ai, int confidence, bool sent) {
+   int h=FileOpen("AZT_signals_v5.csv",FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
    if(h==INVALID_HANDLE) { Print("AZT: signal CSV ochilmadi: ",GetLastError()); return; }
-   if(FileSize(h)==0) FileWriteString(h,"time,symbol,timeframe,side,setup,entry,sl,tp1,tp2,tp3,zone_low,zone_high,score,atr\r\n");
+   if(FileSize(h)==0) FileWriteString(h,"time,symbol,timeframe,side,setup,entry,sl,tp1,tp2,tp3,zone_low,zone_high,score,atr,ai,ai_conf,sent,mtf\r\n");
    FileSeek(h,0,SEEK_END);
-   FileWriteString(h,TimeToString(signal.time,TIME_DATE|TIME_MINUTES)+","+_Symbol+","+EnumToString(TF)+","+
-      (signal.side==1 ? "BUY" : "SELL")+","+signal.setup+","+Price(signal.entry)+","+Price(signal.sl)+","+
+   FileWriteString(h,TimeToString(signal.time,TIME_DATE|TIME_MINUTES)+","+_Symbol+","+TFName(TF)+","+
+      (signal.side==1 ? "BUY" : "SELL")+","+CsvClean(signal.setup)+","+Price(signal.entry)+","+Price(signal.sl)+","+
       Price(signal.tp1)+","+Price(signal.tp2)+","+Price(signal.tp3)+","+Price(signal.zoneBottom)+","+
-      Price(signal.zoneTop)+","+(string)signal.score+","+DoubleToString(signal.atr,_Digits)+"\r\n");
+      Price(signal.zoneTop)+","+(string)signal.score+","+DoubleToString(signal.atr,_Digits)+","+ai+","+
+      (string)confidence+","+(sent ? "1" : "0")+","+CsvClean(signal.mtf)+"\r\n");
    FileClose(h);
 }
 
 void Scan() {
+   for(int k=0;k<TFCount;k++) { SwitchTF(k); ScanTF(); }
+   Panel();
+}
+
+// One timeframe (already loaded by SwitchTF).
+void ScanTF() {
    if(!Ready) {
       int count=RequiredBars()+HistoryBars;
       int available=Bars(_Symbol,TF);
       if(available<RequiredBars()) {
          CopyRates(_Symbol,TF,0,RequiredBars(),Rates);
-         Status="Waiting for price history"; Panel(); return;
+         Status="Waiting for price history"; return;
       }
       count=MathMin(count,available);
-      if(!LoadData(count)) { Status="Waiting for indicator data"; Panel(); return; }
+      if(!LoadData(count)) { Status="Waiting for indicator data"; return; }
       RebuildStructure();
       RunHistoricalAnalysis();
       ResolveJournal();
@@ -671,39 +795,36 @@ void Scan() {
       Status="Ready: waiting for the next candle close";
       Print("AZT ready: ",_Symbol," ",EnumToString(TF),"; historical signals=",HistoricalSignals,
             "; mode=",ModeName(),". Historical signals never trigger orders/alerts.");
-      Panel(); return;
+      return;
    }
    datetime closed=iTime(_Symbol,TF,1);
-   if(closed<=0 || closed==LastClosedBar) { Panel(); return; }
+   if(closed<=0 || closed==LastClosedBar) { return; }
    if(!MQLInfoInteger(MQL_TESTER) && !TerminalInfoInteger(TERMINAL_CONNECTED)) {
-      Status="Waiting: broker disconnected"; Panel(); return;
+      Status="Waiting: broker disconnected"; return;
    }
    int count=MathMin(Bars(_Symbol,TF),RequiredBars()+HistoryBars);
-   if(count<RequiredBars() || !LoadData(count)) { Status="Waiting for indicator data; will retry"; Panel(); return; }
+   if(count<RequiredBars() || !LoadData(count)) { Status="Waiting for indicator data; will retry"; return; }
    RebuildStructure();
    // Only mark processed after all data is ready; shared OnTick/OnTimer guard.
    LastClosedBar=Rates[1].time;
    RunHistoricalAnalysis(false);
    ResolveJournal();
-   if(!MQLInfoInteger(MQL_TESTER) && TimeCurrent()-Rates[0].time>MaxSignalDelaySeconds) {
-      Status="Late candle skipped: waiting for a fresh close"; Panel(); return;
+   // Higher timeframes get a longer window (a D1/H4 bar's first tick can come minutes after its open).
+   int maxDelay=MathMax(MaxSignalDelaySeconds,PeriodSeconds(TF)/12);
+   if(!MQLInfoInteger(MQL_TESTER) && TimeCurrent()-Rates[0].time>maxDelay) {
+      Status="Late candle skipped: waiting for a fresh close"; return;
    }
    LocalSignal signal; string reason;
-   if(!EvaluateSignal(1,signal,reason)) { Status=reason; Print("AZT: ",Status); Panel(); return; }
-   if(CoolingDown(1)) { Status="Waiting: signal cooldown"; Panel(); return; }
+   if(!EvaluateSignal(1,signal,reason) || !StrictChecks(1,signal,reason)) { Status=reason; Print("AZT ",TFName(TF),": ",Status); return; }
+   if(CoolingDown(1)) { Status="Waiting: signal cooldown"; return; }
    LastSignalBar=signal.time;
+   SetupCount++;
    DrawSignal(signal,false);
-   Status=(signal.side==1 ? "BUY" : "SELL")+string(" signal: ")+signal.setup;
-   string message="AZT "+_Symbol+" "+EnumToString(TF)+" "+Status+" | Entry "+Price(signal.entry)+
-      " SL "+Price(signal.sl)+" TP1 "+Price(signal.tp1)+" TP2 "+Price(signal.tp2)+" TP3 "+Price(signal.tp3);
-   Print(message);
-   if(!MQLInfoInteger(MQL_TESTER)) {
-      ExportSignal(signal);
-      if(PopupAlerts) Alert(message);
-      if(PushNotifications && !SendNotification(message)) Print("Push notification failed: ",GetLastError());
-   }
+   Status=(signal.side==1 ? "BUY" : "SELL")+string(" setup: ")+signal.setup;
+   Print("AZT ",_Symbol," ",TFName(TF)," ",Status," | Entry ",Price(signal.entry)," SL ",Price(signal.sl),
+         " TP1 ",Price(signal.tp1)," TP2 ",Price(signal.tp2)," TP3 ",Price(signal.tp3));
    HandleSignal(signal);
-   Panel(); ChartRedraw();
+   if(DrawEnabled) ChartRedraw();
 }
 
 // Scores earlier signals on new closed candles and reports each AI's accuracy.
@@ -711,12 +832,17 @@ void ResolveJournal() {
    if(MQLInfoInteger(MQL_TESTER)) return;
    int resolved[];
    if(JournalResolve(resolved)==0) return;
-   for(int i=0;i<ArraySize(resolved);i++)
+   for(int i=0;i<ArraySize(resolved);i++) {
+      string action=Journal[resolved[i]].action;
+      // Signals Claude did not pass were never sent: their results only feed Claude's memory.
+      if(action=="AI_REJECT" || action=="AI_LOW_CONF" || action=="AI_ERROR" || action=="NO_AI") continue;
       if(Journal[resolved[i]].outcome==1 || Journal[resolved[i]].outcome==-1)
          Notify("jr|"+Journal[resolved[i]].id,JournalResultText(resolved[i]));
+   }
 }
 
-// AI review, then: no trade / trade alone / ask for the Telegram button.
+// AI review first. Only a signal that passed every check AND Claude's review reaches Telegram
+// (RequireAIApproval); then: signal only / trade alone / ask for the Telegram button.
 void HandleSignal(const LocalSignal &signal) {
    string id=AZTTelegramHash(_Symbol+"|"+EnumToString(TF)+"|"+(string)(long)signal.time+"|"+(string)MagicNumber);
    string key=_Symbol+"|"+EnumToString(TF)+"|"+(string)(long)signal.time;
@@ -729,21 +855,20 @@ void HandleSignal(const LocalSignal &signal) {
       if(TradeMode!=AZT_SIGNALS_ONLY) TradeStatus=(AutoOrder(signal,reason) ? "" : "Order skipped: ")+reason;
       return;
    }
-   QueueSignalImage(signal,key);
    string text=SignalText(signal,volumeOk,volume,riskMoney,volumeReason);
    AZTAIVerdict verdicts[AZT_AI_COUNT];
    for(int p=0;p<AZT_AI_COUNT;p++) ZeroMemory(verdicts[p]);
    int providers=AZTAIProviders(), approvals=0, rejections=0, minConfidence=100;
-   string trustNote="";
+   string trustNote="", aiError="";
    if(InpAIEnabled && providers>0) {
-      Status="AI tahlil qilmoqda..."; Panel();
+      Status="Claude tekshirmoqda..."; Panel();
       string prompt=BuildAIPrompt(signal);
-      text+="\n\n🤖 AI TAHLIL:";
+      text+="\n\n🤖 CLAUDE TEKSHIRUVI:";
       for(int p=0;p<AZT_AI_COUNT;p++) {
          if(!AZTAIHasKey(p)) continue;
          AZTAIReview(p,prompt+JournalMemory(p),verdicts[p]);
          text+="\n"+AZTAIVerdictText(AZTAIName(p),verdicts[p]);
-         if(!verdicts[p].ok) continue;
+         if(!verdicts[p].ok) { aiError=verdicts[p].error; continue; }
          if(verdicts[p].decision==1) {
             approvals++; minConfidence=MathMin(minConfidence,verdicts[p].confidence);
             int samples; double precision=JournalApprovePrecision(p,samples);
@@ -756,14 +881,43 @@ void HandleSignal(const LocalSignal &signal) {
    } else text+="\n\n🤖 AI: o'chiq (AZT_Config.ini da API kalit yo'q)";
    bool aiAgrees=providers>0 && approvals==providers && minConfidence>=InpAIAutoConfidence && trustNote=="";
    bool aiRejects=rejections>0 && approvals==0;
+   bool aiVerified=InpAIEnabled && providers>0 && approvals==providers && minConfidence>=MinAIConfidence;
+   string aiWord=approvals>0 ? "APPROVE" : rejections>0 ? "REJECT" : "NONE";
+   int aiConfidence=verdicts[AZT_AI_CLAUDE].ok ? verdicts[AZT_AI_CLAUDE].confidence : 0;
    string context=SignalContext();
-   Status=(signal.side==1 ? "BUY" : "SELL")+string(" signal: ")+signal.setup+
-          " | AI approve="+(string)approvals+" reject="+(string)rejections;
+   Status=(signal.side==1 ? "BUY" : "SELL")+string(" setup: ")+signal.setup+
+          " | Claude "+aiWord+(aiConfidence>0 ? " "+(string)aiConfidence+"%" : "");
+
+   // Gate: an unverified signal is journaled (Claude still learns from its outcome) but never sent.
+   if(RequireAIApproval && !aiVerified) {
+      string action=!InpAIEnabled || providers==0 ? "NO_AI" : aiRejects ? "AI_REJECT" :
+                    approvals>0 ? "AI_LOW_CONF" : "AI_ERROR";
+      FilteredCount++;
+      TradeStatus="Yuborilmadi: "+(action=="AI_LOW_CONF" ? "Claude ishonchi "+(string)minConfidence+"% < "+
+                  (string)MinAIConfidence+"%" : action=="AI_REJECT" ? "Claude rad etdi" : "Claude tekshira olmadi");
+      JournalAdd(id,signal,context,verdicts,action);
+      ExportSignal(signal,aiWord,aiConfidence,false);
+      if((action=="AI_ERROR" || action=="NO_AI") && TimeLocal()>=NextAIWarning) {
+         NextAIWarning=TimeLocal()+3600;
+         Notify("aiwarn|"+(string)(long)TimeLocal(),"⚠️ "+_Symbol+" "+TFName(TF)+": Claude signalni tekshira olmadi ("+
+            (aiError!="" ? aiError : "API kalit yo'q")+").\nTekshirilmagan signal yuborilmaydi. Chartdagi AI TEST tugmasini bosing.");
+      }
+      return;
+   }
+   SentCount++;
+   ExportSignal(signal,aiWord,aiConfidence,true);
+   string headline="AZT "+_Symbol+" "+TFName(TF)+" "+(signal.side==1 ? "BUY" : "SELL")+" "+signal.setup+
+      " | Entry "+Price(signal.entry)+" SL "+Price(signal.sl)+" TP3 "+Price(signal.tp3);
+   if(PopupAlerts) Alert(headline);
+   if(PushNotifications && !SendNotification(headline)) Print("Push notification failed: ",GetLastError());
+   QueueSignalImage(signal,key);
+   text=(aiVerified ? "✅ TEKSHIRUVDAN O'TDI: barcha omillar + yuqori TF + Claude "+(string)minConfidence+"%"
+                    : "ℹ️ Qoidalar tekshiruvidan o'tdi, Claude TASDIQLAMAGAN (RequireAIApproval=false)")+"\n"+text;
 
    if(TradeMode==AZT_SIGNALS_ONLY) {
       TradeStatus="Faqat signal rejimi";
       JournalAdd(id,signal,context,verdicts,"SIGNAL_ONLY");
-      Notify(key,text+"\n\nℹ️ Faqat signal rejimi: savdo ochilmaydi.");
+      Notify(key,text+"\n\nℹ️ Faqat signal rejimi: savdo ochilmaydi. Natija keyinroq 📘 xabarda keladi.");
       return;
    }
    if(aiRejects && SkipWhenAIRejects) {
@@ -791,10 +945,13 @@ void HandleSignal(const LocalSignal &signal) {
       return;
    }
    if(Pending.active) {
-      JournalSetAction(Pending.id,"SUPERSEDED");
+      int current=TFIndex;
+      SwitchTF(Pending.tf);
+      JournalSetAction(Pending.id,"SUPERSEDED"); // loads that timeframe's journal
+      SwitchTF(current);
       Notify("sup|"+Pending.id,"Avvalgi tasdiq so'rovi yangi signal bilan almashtirildi: "+Pending.id);
    }
-   Pending.active=true; Pending.id=id; Pending.signal=signal;
+   Pending.active=true; Pending.id=id; Pending.signal=signal; Pending.tf=TFIndex;
    Pending.expires=TimeLocal()+ApprovalTimeoutMinutes*60;
    TradeStatus="Telegram tasdig'i kutilmoqda ("+(string)ApprovalTimeoutMinutes+" daqiqa)";
    JournalAdd(id,signal,context,verdicts,"WAITING");
@@ -805,6 +962,7 @@ void HandleSignal(const LocalSignal &signal) {
 // Called from OnTimer: executes or drops the trade once you press a button.
 void ProcessPending() {
    if(!Pending.active) return;
+   SwitchTF(Pending.tf); // journal and messages belong to the signal's timeframe
    int decision=AZTDecision(Pending.id);
    if(decision==0) { AZTTelegramPollDecisions(); decision=AZTDecision(Pending.id); }
    if(decision==0) {
@@ -812,7 +970,7 @@ void ProcessPending() {
       Pending.active=false;
       TradeStatus="Tasdiq muddati tugadi: savdo yo'q";
       JournalSetAction(Pending.id,"EXPIRED");
-      Notify("exp|"+Pending.id,"⌛ "+_Symbol+" "+StringSubstr(EnumToString(TF),7)+": tasdiq muddati tugadi, savdo ochilmadi.");
+      Notify("exp|"+Pending.id,"⌛ "+_Symbol+" "+TFName(TF)+": tasdiq muddati tugadi, savdo ochilmadi.");
       return;
    }
    Pending.active=false;
@@ -878,6 +1036,111 @@ void RunAITest() {
       "\nBu savdo signali emas.");
 }
 
+// ---- Timeframe switching -------------------------------------------------------
+string ScanList() {
+   string text="";
+   for(int k=0;k<TFCount;k++) text+=(k>0 ? "," : "")+TFName(TFList[k]);
+   return text;
+}
+
+bool ParseTimeframe(string name, ENUM_TIMEFRAMES &tf) {
+   StringTrimLeft(name); StringTrimRight(name); StringToUpper(name);
+   string names[]={"M1","M2","M3","M5","M10","M15","M20","M30","H1","H2","H3","H4","H6","H8","H12","D1","W1","MN1"};
+   ENUM_TIMEFRAMES values[]={PERIOD_M1,PERIOD_M2,PERIOD_M3,PERIOD_M5,PERIOD_M10,PERIOD_M15,PERIOD_M20,PERIOD_M30,
+      PERIOD_H1,PERIOD_H2,PERIOD_H3,PERIOD_H4,PERIOD_H6,PERIOD_H8,PERIOD_H12,PERIOD_D1,PERIOD_W1,PERIOD_MN1};
+   for(int i=0;i<ArraySize(names);i++) if(names[i]==name) { tf=values[i]; return true; }
+   return false;
+}
+
+// ScanTimeframes -> TFList, ascending, without duplicates. Empty -> SignalTimeframe / chart timeframe.
+bool BuildTimeframeList() {
+   TFCount=0;
+   string parts[];
+   int n=StringSplit(ScanTimeframes,',',parts);
+   for(int i=0;i<n;i++) {
+      string part=parts[i];
+      StringTrimLeft(part); StringTrimRight(part);
+      if(part=="") continue;
+      ENUM_TIMEFRAMES tf;
+      if(!ParseTimeframe(part,tf)) { Print("AZT: noma'lum timeframe '",part,"' (masalan: M5,M15,H1,H4,D1)"); return false; }
+      bool seen=false;
+      for(int k=0;k<TFCount;k++) if(TFList[k]==tf) seen=true;
+      if(seen) continue;
+      if(TFCount>=AZT_MAX_TF) { Print("AZT: ko'pi bilan ",AZT_MAX_TF," ta timeframe"); return false; }
+      int at=TFCount;
+      while(at>0 && PeriodSeconds(TFList[at-1])>PeriodSeconds(tf)) { TFList[at]=TFList[at-1]; at--; }
+      TFList[at]=tf; TFCount++;
+   }
+   if(TFCount==0) { TFList[0]=SignalTimeframe==PERIOD_CURRENT ? (ENUM_TIMEFRAMES)_Period : SignalTimeframe; TFCount=1; }
+   return true;
+}
+
+void SaveTF() {
+   if(TFIndex<0) return;
+   TFLastClosed[TFIndex]=LastClosedBar; TFLastSignal[TFIndex]=LastSignalBar; TFReady[TFIndex]=Ready;
+   TFStatus[TFIndex]=Status; TFHistory[TFIndex]=HistoryStatus; TFHistSignals[TFIndex]=HistoricalSignals;
+}
+
+// Loads timeframe k into the globals (handles, scan state, journal). Rates[] etc. are reloaded by LoadData.
+void SwitchTF(int k) {
+   if(k<0 || k>=TFCount) return;
+   if(k!=TFIndex) {
+      SaveTF();
+      TFIndex=k; TF=TFList[k];
+      FastHandle=TFFast[k]; SlowHandle=TFSlow[k]; RSIHandle=TFRSI[k]; ATRHandle=TFATR[k];
+      MACDHandle=TFMACD[k]; TrendMAHandle=TFTrendMA[k];
+      LastClosedBar=TFLastClosed[k]; LastSignalBar=TFLastSignal[k]; Ready=TFReady[k];
+      Status=TFStatus[k]; HistoryStatus=TFHistory[k]; HistoricalSignals=TFHistSignals[k];
+      DrawEnabled=TF==(ENUM_TIMEFRAMES)_Period;
+      // Rates[] and indicator arrays still hold the previous timeframe: ScanTF reloads them (LoadData)
+      // before anything reads them. The journal is loaded lazily by EnsureJournal().
+      InvalidateStructureCache();
+   }
+}
+
+// Lessons from wrong calls: one timeframe per call, at most every 30 seconds.
+void ReflectNext() {
+   static int next=-1;
+   static datetime nextTry=0;
+   if(Pending.active || TFCount==0 || !InpAILearnFromMistakes || MQLInfoInteger(MQL_TESTER) || TimeLocal()<nextTry) return;
+   nextTry=TimeLocal()+30;
+   next=(next+1)%TFCount;
+   SwitchTF(next);
+   if(Ready) JournalReflectOne();
+}
+
+// ---- "EA ishlayapti" report and start message -----------------------------------
+void Heartbeat() {
+   if(HeartbeatHours<=0 || MQLInfoInteger(MQL_TESTER) || !AZTTelegramReady() || TimeLocal()<NextHeartbeat) return;
+   bool first=NextHeartbeat==0;
+   SaveTF();
+   if(first) {
+      // Start message once every timeframe has loaded (or after 2 minutes).
+      bool all=true;
+      for(int k=0;k<TFCount;k++) if(!TFReady[k]) all=false;
+      if(!all && TimeLocal()-StartedAt<120) return;
+   }
+   NextHeartbeat=TimeLocal()+HeartbeatHours*3600;
+   string guard="AZTHB."+PosScope;
+   // Re-attaching the EA (inputs changed) must not spam start messages.
+   if(first && GlobalVariableCheck(guard) && TimeLocal()-(datetime)GlobalVariableGet(guard)<1800) return;
+   GlobalVariableSet(guard,(double)TimeLocal());
+   string frames="";
+   for(int k=0;k<TFCount;k++) frames+="\n• "+TFName(TFList[k])+": "+(TFReady[k] ? "✓ " : "⏳ ")+AZTTrimTo(TFStatus[k],70);
+   string text=(first ? "🟢 EA ISHGA TUSHDI" : "🫀 EA ISHLAYAPTI")+" | "+_Symbol+
+      "\nRejim: "+ModeName()+
+      "\nTimeframe'lar:"+frames+
+      "\nHozirgi trend: "+MTFMatrix()+
+      "\nTekshiruv: "+(RequireAllChecks ? "barcha omillar" : "konfluens bali")+(MTFFilter ? " + yuqori TF" : "")+
+      (RequireAIApproval ? " + Claude APPROVE >= "+(string)MinAIConfidence+"%" : "")+
+      "\nAI: "+AZTAIStatus();
+   if(!first) text+="\nOxirgi "+(string)HeartbeatHours+" soatda: setup "+(string)SetupCount+", yuborilgan signal "+
+      (string)SentCount+", Claude o'tkazmagan "+(string)FilteredCount;
+   text+="\nSinash: chartdagi \"Telegram TEST\" tugmasi namunaviy signal yuboradi, \"AI TEST\" Claude'ni tekshiradi.";
+   SetupCount=0; SentCount=0; FilteredCount=0;
+   Notify("hb|"+PosScope+"|"+(string)(long)TimeLocal(),text);
+}
+
 void Button(string name, int y, string text) {
    ObjectCreate(0,name,OBJ_BUTTON,0,0,0);
    ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
@@ -911,21 +1174,31 @@ int OnInit() {
       SNRZoneATR<=0 || SNRMinTouches<2 || MinConfluence<-10 || MinConfluence>10) {
       Print("AZT: Invalid input parameters"); return INIT_PARAMETERS_INCORRECT;
    }
-   TF=SignalTimeframe==PERIOD_CURRENT ? (ENUM_TIMEFRAMES)_Period : SignalTimeframe;
+   if(MTFMinAgreePercent<0 || MTFMinAgreePercent>100 || MinAIConfidence<0 || MinAIConfidence>100 ||
+      HeartbeatHours<0 || HeartbeatHours>168 || !BuildTimeframeList()) {
+      Print("AZT: Invalid input parameters (ScanTimeframes / MTF / AI / Heartbeat)"); return INIT_PARAMETERS_INCORRECT;
+   }
    Prefix="AZT_LOCAL_"+(string)MagicNumber+"_";
    PosScope=StringSubstr(AZTTelegramHash(_Symbol+"|"+(string)MagicNumber),0,8);
    ArraySetAsSeries(Rates,true); ArraySetAsSeries(Fast,true); ArraySetAsSeries(Slow,true);
    ArraySetAsSeries(RSI,true); ArraySetAsSeries(ATR,true);
    ArraySetAsSeries(MACDMain,true); ArraySetAsSeries(MACDSignal,true); ArraySetAsSeries(TrendMA,true);
-   FastHandle=iMA(_Symbol,TF,FastEMA,0,MODE_EMA,PRICE_CLOSE);
-   SlowHandle=iMA(_Symbol,TF,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
-   RSIHandle=iRSI(_Symbol,TF,RSIPeriod,PRICE_CLOSE); ATRHandle=iATR(_Symbol,TF,ATRPeriod);
-   MACDHandle=iMACD(_Symbol,TF,MACDFast,MACDSlow,MACDSignalPeriod,PRICE_CLOSE);
-   TrendMAHandle=iMA(_Symbol,TF,TrendMAPeriod,0,MODE_SMA,PRICE_CLOSE);
-   if(FastHandle==INVALID_HANDLE || SlowHandle==INVALID_HANDLE || RSIHandle==INVALID_HANDLE || ATRHandle==INVALID_HANDLE ||
-      MACDHandle==INVALID_HANDLE || TrendMAHandle==INVALID_HANDLE) {
-      Print("AZT: Cannot create indicators: ",GetLastError()); return INIT_FAILED;
+   for(int k=0;k<TFCount;k++) {
+      ENUM_TIMEFRAMES tf=TFList[k];
+      TFFast[k]=iMA(_Symbol,tf,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+      TFSlow[k]=iMA(_Symbol,tf,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+      TFRSI[k]=iRSI(_Symbol,tf,RSIPeriod,PRICE_CLOSE); TFATR[k]=iATR(_Symbol,tf,ATRPeriod);
+      TFMACD[k]=iMACD(_Symbol,tf,MACDFast,MACDSlow,MACDSignalPeriod,PRICE_CLOSE);
+      TFTrendMA[k]=iMA(_Symbol,tf,TrendMAPeriod,0,MODE_SMA,PRICE_CLOSE);
+      TFLastClosed[k]=0; TFLastSignal[k]=0; TFReady[k]=false;
+      TFStatus[k]="Starting"; TFHistory[k]="History analysis pending"; TFHistSignals[k]=0;
+      if(TFFast[k]==INVALID_HANDLE || TFSlow[k]==INVALID_HANDLE || TFRSI[k]==INVALID_HANDLE || TFATR[k]==INVALID_HANDLE ||
+         TFMACD[k]==INVALID_HANDLE || TFTrendMA[k]==INVALID_HANDLE) {
+         Print("AZT: Cannot create indicators for ",TFName(tf),": ",GetLastError()); return INIT_FAILED;
+      }
    }
+   TFIndex=-1; JournalTF=-1; StartedAt=TimeLocal(); NextHeartbeat=0;
+   SwitchTF(0);
    Trade.SetExpertMagicNumber(MagicNumber); Trade.SetDeviationInPoints(SlippagePoints);
    Trade.SetAsyncMode(false);
    AZTTelegramInit();
@@ -936,7 +1209,6 @@ int OnInit() {
          HTFHandles[i*2]=iMA(_Symbol,htf[i],FastEMA,0,MODE_EMA,PRICE_CLOSE);
          HTFHandles[i*2+1]=iMA(_Symbol,htf[i],SlowEMA,0,MODE_EMA,PRICE_CLOSE);
       }
-      JournalLoad();
       Button(Prefix+"TELEGRAM_TEST",25,"Telegram TEST (tugmali)");
       Button(Prefix+"AI_TEST",55,"AI TEST (Claude)");
       if(TradeMode!=AZT_SIGNALS_ONLY && !AZTTelegramReady())
@@ -950,12 +1222,15 @@ int OnInit() {
 
 void OnDeinit(const int reason) {
    EventKillTimer();
-   if(FastHandle!=INVALID_HANDLE) IndicatorRelease(FastHandle);
-   if(SlowHandle!=INVALID_HANDLE) IndicatorRelease(SlowHandle);
-   if(RSIHandle!=INVALID_HANDLE) IndicatorRelease(RSIHandle);
-   if(ATRHandle!=INVALID_HANDLE) IndicatorRelease(ATRHandle);
-   if(MACDHandle!=INVALID_HANDLE) IndicatorRelease(MACDHandle);
-   if(TrendMAHandle!=INVALID_HANDLE) IndicatorRelease(TrendMAHandle);
+   for(int k=0;k<TFCount;k++) {
+      if(TFFast[k]!=INVALID_HANDLE) IndicatorRelease(TFFast[k]);
+      if(TFSlow[k]!=INVALID_HANDLE) IndicatorRelease(TFSlow[k]);
+      if(TFRSI[k]!=INVALID_HANDLE) IndicatorRelease(TFRSI[k]);
+      if(TFATR[k]!=INVALID_HANDLE) IndicatorRelease(TFATR[k]);
+      if(TFMACD[k]!=INVALID_HANDLE) IndicatorRelease(TFMACD[k]);
+      if(TFTrendMA[k]!=INVALID_HANDLE) IndicatorRelease(TFTrendMA[k]);
+   }
+   TFCount=0;
    for(int i=0;i<4;i++) if(HTFHandles[i]!=INVALID_HANDLE) { IndicatorRelease(HTFHandles[i]); HTFHandles[i]=INVALID_HANDLE; }
    if(Prefix!="") ObjectsDeleteAll(0,Prefix);
    Comment("");
@@ -967,7 +1242,8 @@ void OnTimer() {
    ProcessTelegramTest();
    ManagePositions();
    ReportClosedPositions();
-   if(Ready && !Pending.active) JournalReflectOne();
+   ReflectNext();
+   Heartbeat();
    AZTTelegramPump();
    Panel();
 }

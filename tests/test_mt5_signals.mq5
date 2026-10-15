@@ -42,7 +42,8 @@ void OnStart() {
    Check(AZTPositionSlotAvailable(1,0,3,false,false),"netting allows another symbol within cap");
    LocalSignal signal; string reason;
    Fixture();
-   Check(TradeMode!=AZT_SIGNALS_ONLY && TP3_R>=3.0,"default mode asks AI/approval and targets 1:3");
+   Check(TradeMode==AZT_SIGNALS_ONLY && TP3_R>=3.0,"default mode sends verified signals only and targets 1:3");
+   Check(RequireAllChecks && MTFFilter && RequireAIApproval && MinAIConfidence>=50,"strict checks and Claude approval on by default");
    Check(EvaluateSignal(1,signal,reason) && signal.side==1 && signal.setup=="EMA pullback","BUY pullback");
    Check(signal.sl<signal.entry && signal.entry<signal.tp1 && signal.tp1<=signal.tp2 && signal.tp2<=signal.tp3,"BUY SL/TP direction");
    Check(signal.entry-signal.sl>=StopATR*signal.atr,"ATR minimum stop distance");
@@ -85,6 +86,19 @@ void OnStart() {
    Rates[2].low=100;                                                               // gap not filled
    Check(EvaluateSignal(1,signal,reason) && signal.score==3 && StringFind(signal.factors,"FVG")>=0,
       "reaction from unfilled bullish FVG adds a confirmation");
+   // Multi-timeframe list: parsed, sorted, de-duplicated.
+   ENUM_TIMEFRAMES parsed;
+   Check(ParseTimeframe(" h4 ",parsed) && parsed==PERIOD_H4 && !ParseTimeframe("X9",parsed),"timeframe names parse");
+   Check(BuildTimeframeList() && TFCount==6 && TFList[0]==PERIOD_M5 && TFList[5]==PERIOD_D1,"default scan list M5..D1");
+   bool ascending=true;
+   for(int k=1;k<TFCount;k++) if(PeriodSeconds(TFList[k])<=PeriodSeconds(TFList[k-1])) ascending=false;
+   Check(ascending,"scan list sorted from lowest to highest timeframe");
+   TFCount=0; // no indicator handles in this test: MTF has no higher-timeframe data
+   // Strict gate: an opposing factor blocks the signal; without higher-TF data MTF does not block.
+   Fixture();
+   Check(EvaluateSignal(1,signal,reason) && signal.against==0 && StrictChecks(1,signal,reason),"clean signal passes strict checks");
+   signal.against=1;
+   Check(!StrictChecks(1,signal,reason) && StringFind(reason,"qarshi")>=0,"opposing factor blocks signal (RequireAllChecks)");
    string result="AZT_TEST_RESULT passed="+(string)Passed+" failed="+(string)Failed;
    Print(result);
    int file=FileOpen("azt_test_result.txt",FILE_WRITE|FILE_TXT);

@@ -1,4 +1,25 @@
-﻿Current revision: Claude-only. Earlier runtime results below predate this change.
+﻿# Validation — EA 5.00 (multi-timeframe)
+
+**Not compiled yet.** Version 5.00 was written without access to MetaEditor (the build machine
+cannot download MetaTrader). Before use:
+
+1. Run `Install-MT5.ps1` (it compiles with the terminal's MetaEditor and prints `Compiled:` or the errors),
+   or open `AI_Zone_Trader_EA.mq5` in MetaEditor and press F7. Expect 0 errors.
+2. Compile and run `tests/test_mt5_signals.mq5` (new checks: timeframe list, strict gate, defaults).
+   `tests/test_mt5_structure_history.mq5` exercises the history replay, which now also applies the strict
+   gate (`RequireAllChecks`): if its expected counts change, review them against the new rule.
+3. On a demo account: attach to one chart, press **Telegram TEST** and **AI TEST**, wait for the
+   "EA ISHGA TUSHDI" message listing M5..D1 as ready.
+
+Changes in 5.00: one chart scans `ScanTimeframes`; higher-timeframe alignment gate; no opposing
+confluence factor allowed; Claude APPROVE >= `MinAIConfidence` required before anything is sent;
+chart image only for verified signals; heartbeat/start messages; AI-failure warning; default
+`AZT_SIGNALS_ONLY`; `AZT_signals_v5.csv` export with the AI verdict; Install-MT5.ps1 compiles instead
+of shipping a prebuilt .ex5.
+
+---
+
+Current revision: Claude-only. Earlier runtime results below predate this change.
 
 # Validation — EA 4.00
 

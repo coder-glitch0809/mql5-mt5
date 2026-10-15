@@ -1,7 +1,7 @@
 // Signal journal = the AIs' memory. Every live signal is stored with Claude
 // verdicts, then scored on real closed candles with the 3-part exit plan.
 // Each AI is shown its own record next time; after a wrong call it writes a lesson.
-// File: MQL5/Files/AZT_Journal_<symbol>_<tf>.csv (one per chart symbol/timeframe).
+// File: MQL5/Files/AZT_Journal_<symbol>_<tf>.csv (one per symbol and scanned timeframe).
 // Include after AZT_History.mqh and AZT_AI.mqh.
 #ifndef AZT_JOURNAL_MQH
 #define AZT_JOURNAL_MQH
@@ -83,12 +83,21 @@ void JournalLoad() {
    FileClose(file);
 }
 
+// Each scanned timeframe has its own journal file; load the current one when it is needed.
+// TFIndex/JournalTF live in the EA; in unit tests both stay -1 so nothing is reloaded.
+void EnsureJournal() {
+   if(JournalTF==TFIndex) return;
+   JournalLoad();
+   JournalTF=TFIndex;
+}
+
 int JournalFind(const string id) {
    for(int i=ArraySize(Journal)-1;i>=0;i--) if(Journal[i].id==id) return i;
    return -1;
 }
 
 void JournalAdd(const string id,const LocalSignal &signal,const string context,const AZTAIVerdict &verdicts[],const string action) {
+   EnsureJournal();
    if(JournalFind(id)>=0) return;
    int n=ArraySize(Journal);
    if(n>=AZT_JOURNAL_MAX) { ArrayRemove(Journal,0,n-AZT_JOURNAL_MAX+1); n=ArraySize(Journal); }
@@ -106,6 +115,7 @@ void JournalAdd(const string id,const LocalSignal &signal,const string context,c
 }
 
 void JournalSetAction(const string id,const string action) {
+   EnsureJournal();
    int i=JournalFind(id);
    if(i<0) return;
    Journal[i].action=action;
@@ -127,6 +137,7 @@ string OutcomeText(const AZTJournalRow &r) {
 
 // APPROVE accuracy of `provider` over its newest judged approvals.
 double JournalApprovePrecision(int provider,int &samples,int newest=20) {
+   EnsureJournal();
    samples=0; int right=0;
    for(int i=ArraySize(Journal)-1;i>=0 && samples<newest;i--) {
       if(Journal[i].dec[provider]!=1) continue;
@@ -153,6 +164,7 @@ string JournalScore(int provider) {
 
 // The provider's own memory, appended to its prompt.
 string JournalMemory(int provider,int newest=15) {
+   EnsureJournal();
    string lines="";
    int shown=0;
    for(int i=ArraySize(Journal)-1;i>=0 && shown<newest;i--) {
@@ -173,6 +185,7 @@ string JournalMemory(int provider,int newest=15) {
 
 // Scores pending rows on closed candles. Returns indexes that just resolved.
 int JournalResolve(int &resolved[]) {
+   EnsureJournal();
    ArrayResize(resolved,0);
    bool changed=false;
    for(int i=0;i<ArraySize(Journal);i++) {
@@ -219,6 +232,7 @@ string JournalResultText(int i) {
 // One lesson per call (rate-limited): the wrong AI explains its own mistake.
 void JournalReflectOne() {
    if(!InpAILearnFromMistakes || AZTAITester() || TimeLocal()<JournalNextReflect) return;
+   EnsureJournal();
    for(int i=ArraySize(Journal)-1;i>=0;i--) {
       if(Journal[i].outcome!=1 && Journal[i].outcome!=-1) continue;
       if(TimeCurrent()-Journal[i].time>7*86400) break; // old backlog is skipped
