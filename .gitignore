@@ -1,0 +1,17 @@
+# Secrets: never commit
+AZT_Config.ini
+AZT_Telegram.ini
+*.env
+.env
+.private/
+
+# Build and test output (the shipped EA binary is kept)
+*.ex5
+# EA binary is not committed: Install-MT5.ps1 compiles it with MetaEditor
+*.log
+
+# Local portable MT5 used for tests
+.mt5-test/
+
+# Deploy bundle
+dist/
