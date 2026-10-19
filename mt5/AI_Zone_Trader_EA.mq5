@@ -3,8 +3,8 @@
 // -> all classic checks + higher-timeframe alignment -> Claude review (it learns from
 // its own record) -> only verified signals go to Telegram -> optional order with SL and 3-part TP.
 #property strict
-#property version "5.00"
-#property description "Multi-timeframe MT5 signals: every check + Claude review before Telegram. SL and 3-part TP (50% at 1.5R, 25% at 2.25R, 25% at 3R)."
+#property version "5.10"
+#property description "Multi-timeframe MT5 signals: 11 strategy families + every check + Claude review before Telegram. SL and TP3 at 1:3 (stop trails to entry, then TP1)."
 #include <Trade/Trade.mqh>
 
 enum AZTTradeMode {
@@ -40,6 +40,7 @@ input double TP2_R = 2.25;               // TP2 = yo'lning 75%i
 input double TP2ClosePercent = 25;       // TP2 da yopiladigan qism, %
 input double TP3_R = 3.0;                // Asosiy TP = risk x3 (brokerga qo'yiladi)
 input bool MoveSLAfterTP = true;         // TP1 dan keyin SL -> Entry, TP2 dan keyin SL -> TP1
+input bool UsePartialTP = false;         // false: butun lot TP3 (1:3) gacha, true: 50%/25%/25% qismlab yopish
 
 input group "4. Signal qoidalari"
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
@@ -50,8 +51,8 @@ input int ATRPeriod = 14;
 input bool EnableCrossSignals = true;
 input bool EnablePullbackSignals = true;
 input double RSIBuyMin = 50.0;
-input double RSIBuyMax = 70.0;
-input double RSISellMin = 30.0;
+input double RSIBuyMax = 65.0;           // Haddan oshgan bozorda BUY yo'q
+input double RSISellMin = 35.0;          // Haddan tushgan bozorda SELL yo'q
 input double RSISellMax = 50.0;
 input int CooldownBars = 3;
 input int MaxSignalDelaySeconds = 180;   // Kechikkan sham signal bermaydi
@@ -88,11 +89,41 @@ input bool UsePatterns = true;           // Engulfing, pin bar, double top/botto
 input group "4c. Barcha timeframe'lar va qat'iy tekshiruv"
 input string ScanTimeframes = "M5,M15,M30,H1,H4,D1"; // Bitta chartdan shu TF'lar skanerlanadi (bo'sh = faqat SignalTimeframe)
 input bool MTFFilter = true;             // Yuqori TF trendi signalga qarshi bo'lsa signal yo'q
-input int MTFMinAgreePercent = 50;       // Yuqori TF'larning kamida shuncha %i signal yo'nalishida bo'lsin
+input int MTFMinAgreePercent = 67;       // Yuqori TF'larning kamida shuncha %i signal yo'nalishida bo'lsin
 input bool RequireAllChecks = true;      // Konfluensda bitta ham qarshi (⚠️) omil bo'lmasin
 input bool RequireAIApproval = true;     // Faqat Claude APPROVE bergan signal Telegram'ga yuboriladi
 input int MinAIConfidence = 70;          // Claude ishonchi shundan past bo'lsa signal yuborilmaydi
 input int HeartbeatHours = 6;            // Telegram'ga "EA ishlayapti" hisoboti har N soatda (0 = o'chiq)
+
+input group "4d. Strategiya oilalari (SNR, SMC/ICT, pattern, sham, PA, indikator, hajm, sessiya, kvant, skalp, snayper)"
+input int MinFamilies = 5;               // Kamida shuncha strategiya oilasi tasdiqlasin (11 tadan)
+input bool UseSMCExtras = true;          // Likvidlik sweep, premium/discount zonasi
+input int SweepBars = 3;
+input int PDRangeBars = 50;
+input bool UseChartPatterns = true;      // Konsolidatsiya (flag/rectangle) breakout
+input int RangeBars = 10;
+input double RangeMaxATR = 2.0;
+input bool UseCandlesExtra = true;       // Morning/evening star, inside bar, three soldiers/crows
+input bool UsePriceAction = true;        // HH/HL yoki LH/LL tuzilmasi
+input bool UseStochastic = true;
+input int StochK = 14;
+input int StochD = 3;
+input int StochSlowing = 3;
+input bool UseADX = true;
+input int ADXPeriod = 14;
+input double MinADX = 20;                // Shundan past ADX: trend kuchsiz
+input bool UseVolume = true;             // Tick volume o'sishi
+input int VolumeAvgBars = 20;
+input double VolumeSpike = 1.5;
+input bool UseSessionFilter = true;      // M5/M15 signal faqat London/New York sessiyasida
+input int SessionStartGMT = 7;
+input int SessionEndGMT = 20;
+input bool UseVolatilityFilter = true;   // ATR haddan tashqari yuqori/past bo'lsa signal yo'q
+input int VolatilityBars = 100;
+input double MaxSpreadRiskPercent = 10;  // Spread SL masofasining shu %idan oshsa signal yo'q
+input double SniperMaxZoneATR = 1.0;     // Narx kirish zonasidan shuncha ATR uzoqlashgan bo'lsa quvib kirilmaydi
+input int MinHistorySamples = 20;        // Shu timeframe tarixida kamida shuncha natija bo'lsa...
+input double MinHistoryExpectancyR = 0.0; // ...o'rtacha natija shundan past bo'lsa jonli signal yo'q
 
 input group "5. AI uchun kontekst"
 input ENUM_TIMEFRAMES AIHigherTF1 = PERIOD_H4;
@@ -115,10 +146,12 @@ CTrade Trade;
 int FastHandle=INVALID_HANDLE, SlowHandle=INVALID_HANDLE;
 int RSIHandle=INVALID_HANDLE, ATRHandle=INVALID_HANDLE;
 int MACDHandle=INVALID_HANDLE, TrendMAHandle=INVALID_HANDLE;
+int StochHandle=INVALID_HANDLE, ADXHandle=INVALID_HANDLE;
 int HTFHandles[4]={INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE};
 ENUM_TIMEFRAMES TF;
 MqlRates Rates[];
 double Fast[], Slow[], RSI[], ATR[], MACDMain[], MACDSignal[], TrendMA[];
+double StochMain[], StochSignal[], ADXMain[], ADXPlus[], ADXMinus[];
 datetime LastClosedBar=0, LastSignalBar=0;
 bool Ready=false;
 string Prefix, PosScope, Status="Starting", LastSignal="none", TradeStatus="", AITestStatus="";
@@ -131,6 +164,7 @@ int HistoricalSignals=0;
 int TFCount=0, TFIndex=-1, JournalTF=-1;
 ENUM_TIMEFRAMES TFList[AZT_MAX_TF];
 int TFFast[AZT_MAX_TF], TFSlow[AZT_MAX_TF], TFRSI[AZT_MAX_TF], TFATR[AZT_MAX_TF], TFMACD[AZT_MAX_TF], TFTrendMA[AZT_MAX_TF];
+int TFStoch[AZT_MAX_TF], TFADX[AZT_MAX_TF];
 datetime TFLastClosed[AZT_MAX_TF], TFLastSignal[AZT_MAX_TF];
 bool TFReady[AZT_MAX_TF];
 string TFStatus[AZT_MAX_TF], TFHistory[AZT_MAX_TF];
@@ -155,6 +189,7 @@ struct LocalSignal {
    int against;    // Number of opposing (⚠️) factors
    string factors; // One line per factor, for Telegram and the AI
    string mtf;     // Higher-timeframe trend line
+   int families;   // Strategy families that confirmed the signal
 };
 
 struct PendingApproval {
@@ -169,6 +204,7 @@ PendingApproval Pending;
 int RequiredBars() {
    int indicators=MathMax(MathMax(SlowEMA*3,MACDSlow*3),MathMax(RSIPeriod,ATRPeriod)*3)+SwingLookback+3;
    indicators=MathMax(indicators,TrendMAPeriod+FVGLookback+3);
+   indicators=MathMax(indicators,MathMax(MathMax(VolatilityBars,PDRangeBars),ADXPeriod*3)+ATRPeriod+3);
    return MathMax(indicators,StructureLookback+2*PivotBars+3);
 }
 
@@ -183,12 +219,14 @@ double TickPrice(double price, int direction=0) {
 string Price(double value) { return DoubleToString(value,_Digits); }
 
 #include "AZT_Confluence.mqh"
+#include "AZT_Strategies.mqh"
 
 bool LoadData(int count) {
    // Series arrays: 0 = forming candle, 1 = last CLOSED candle.
    if(BarsCalculated(FastHandle)<count || BarsCalculated(SlowHandle)<count ||
       BarsCalculated(RSIHandle)<count || BarsCalculated(ATRHandle)<count ||
-      BarsCalculated(MACDHandle)<count || BarsCalculated(TrendMAHandle)<count) return false;
+      BarsCalculated(MACDHandle)<count || BarsCalculated(TrendMAHandle)<count ||
+      BarsCalculated(StochHandle)<count || BarsCalculated(ADXHandle)<count) return false;
    bool loaded=CopyRates(_Symbol,TF,0,count,Rates)==count &&
           CopyBuffer(FastHandle,0,0,count,Fast)==count &&
           CopyBuffer(SlowHandle,0,0,count,Slow)==count &&
@@ -196,7 +234,12 @@ bool LoadData(int count) {
           CopyBuffer(ATRHandle,0,0,count,ATR)==count &&
           CopyBuffer(MACDHandle,0,0,count,MACDMain)==count &&
           CopyBuffer(MACDHandle,1,0,count,MACDSignal)==count &&
-          CopyBuffer(TrendMAHandle,0,0,count,TrendMA)==count;
+          CopyBuffer(TrendMAHandle,0,0,count,TrendMA)==count &&
+          CopyBuffer(StochHandle,0,0,count,StochMain)==count &&
+          CopyBuffer(StochHandle,1,0,count,StochSignal)==count &&
+          CopyBuffer(ADXHandle,0,0,count,ADXMain)==count &&
+          CopyBuffer(ADXHandle,1,0,count,ADXPlus)==count &&
+          CopyBuffer(ADXHandle,2,0,count,ADXMinus)==count;
    if(loaded) InvalidateStructureCache();
    return loaded;
 }
@@ -250,8 +293,13 @@ bool EvaluateSignal(int shift, LocalSignal &signal, string &reason) {
    if(signal.sl<=0 || signal.tp3<=0 || distance<=0) { reason="Invalid price levels"; return false; }
    string blocker;
    bool clear=EvaluateConfluence(shift,side,signal.entry,signal.sl,signal.score,signal.factors,blocker);
-   signal.against=ConfluenceAgainst; signal.mtf="";
-   if(!clear) { reason="Skipped "+signal.setup+": "+blocker; return false; }
+   signal.mtf=""; signal.families=0;
+   if(!clear) { signal.against=ConfluenceAgainst; reason="Skipped "+signal.setup+": "+blocker; return false; }
+   EvaluateStrategies(shift,side,signal.entry,signal.score,signal.factors);
+   // The setup itself belongs to a family: SMC (OB/BOS/CHOCH), price action (trendline) or indicators (EMA).
+   int setupFamily=!structure ? AZT_F_IND : StringFind(signal.setup,"trendline")>=0 ? AZT_F_PA : AZT_F_SMC;
+   FamilyFor[setupFamily]++;
+   signal.against=ConfluenceAgainst;
    if(signal.score<MinConfluence) {
       reason="Skipped "+signal.setup+": confluence "+(string)signal.score+" < "+(string)MinConfluence; return false;
    }
@@ -340,10 +388,11 @@ bool StrictChecks(int shift, LocalSignal &signal, string &reason) {
    signal.score+=vote;
    signal.factors+="\n"+(vote>0 ? "✅ " : blocker!="" ? "⚠️ " : "• ")+line;
    if(MTFFilter && blocker!="") { reason="Skipped "+signal.setup+": "+blocker; return false; }
+   if(vote>0) FamilyFor[AZT_F_PA]++; // all higher timeframes trend the same way
    if(RequireAllChecks && signal.against>0) {
       reason="Skipped "+signal.setup+": "+(string)signal.against+" ta qarshi omil (RequireAllChecks)"; return false;
    }
-   return true;
+   return StrategyGates(shift,signal,reason);
 }
 
 // "200 pt = 20.0 pips" (pips only for 3/5-digit quotes, where the term is unambiguous).
@@ -387,8 +436,8 @@ void DrawSignal(const LocalSignal &signal, bool historical) {
          ObjectSetString(0,zone,OBJPROP_TOOLTIP,"Kirish zonasi | "+signal.setup);
       }
       Level("Entry",signal.entry,clrGold); Level("SL",signal.sl,clrTomato);
-      Level("TP1 "+DoubleToString(TP1ClosePercent,0)+"%",signal.tp1,clrLimeGreen);
-      Level("TP2 "+DoubleToString(TP2ClosePercent,0)+"%",signal.tp2,clrLimeGreen);
+      Level(UsePartialTP ? "TP1 "+DoubleToString(TP1ClosePercent,0)+"%" : "TP1",signal.tp1,clrLimeGreen);
+      Level(UsePartialTP ? "TP2 "+DoubleToString(TP2ClosePercent,0)+"%" : "TP2",signal.tp2,clrLimeGreen);
       Level("TP3",signal.tp3,clrLimeGreen);
    }
 }
@@ -452,7 +501,9 @@ string BuildAIPrompt(const LocalSignal &signal) {
               (Blocks[i].touched ? " (touched)" : " (fresh)");
    p+="\nOrder blocks:"+(blocks=="" ? " none" : blocks);
    p+="\nClassic confluence checks (score "+(string)signal.score+", ✅ agrees / ⚠️ against):"+signal.factors;
-   p+="\nRule backtest on this chart (same 3-part plan): "+HistoryStatus;
+   p+="\nExit plan actually used (overrides the plan in your instructions): "+ExitPlanText()+
+      ". Judge whether price reaches TP3 before the stop.";
+   p+="\nRule backtest on this timeframe (same plan): "+HistoryStatus;
    int count=MathMin(AICandles,ArraySize(Rates)-1);
    p+="\nLast "+(string)count+" closed candles, oldest first (time,open,high,low,close):";
    for(int i=count;i>=1;i--)
@@ -505,12 +556,29 @@ double PartVolume(double initial, double percent, double current) {
 }
 
 string SplitText(double volume) {
+   if(!UsePartialTP) return "Butun lot "+Lots(volume)+" TP3 ("+DoubleToString(TP3_R,1)+"R) gacha"+
+                            (MoveSLAfterTP ? ": TP1 da SL → Entry, TP2 da SL → TP1" : "");
    double p1=PartVolume(volume,TP1ClosePercent,volume);
    double p2=PartVolume(volume,TP2ClosePercent,volume-p1);
    double rest=volume-p1-p2;
    if(p1<=0) return "Lot "+Lots(volume)+" bo'linmaydi (eng kichik lot): hammasi TP3 gacha"+
                     (MoveSLAfterTP ? ", TP1 da SL Entry ga ko'chadi" : "");
    return "Bo'linish: TP1 "+Lots(p1)+" | TP2 "+(p2>0 ? Lots(p2) : "-")+" | TP3 "+Lots(rest)+" lot";
+}
+
+// What happens at TP1 (part 0) / TP2 (part 1).
+string TPAction(int part) {
+   string move=part==0 ? "SL → Entry (zararsiz)" : "SL → TP1";
+   if(!UsePartialTP) return MoveSLAfterTP ? move : "kuzatiladi";
+   return DoubleToString(part==0 ? TP1ClosePercent : TP2ClosePercent,0)+"% yopiladi"+(MoveSLAfterTP ? ", "+move : "");
+}
+
+// Exit plan in English for the Claude prompt (overrides the generic plan in the system text).
+string ExitPlanText() {
+   if(!UsePartialTP) return "whole position targets TP3 = "+DoubleToString(TP3_R,2)+"R (risk 1 : reward "+DoubleToString(TP3_R,1)+
+      ")"+(MoveSLAfterTP ? "; stop moves to entry at "+DoubleToString(TP1_R,2)+"R and to TP1 at "+DoubleToString(TP2_R,2)+"R" : "");
+   return DoubleToString(TP1ClosePercent,0)+"% closed at "+DoubleToString(TP1_R,2)+"R, "+DoubleToString(TP2ClosePercent,0)+
+      "% at "+DoubleToString(TP2_R,2)+"R, rest at "+DoubleToString(TP3_R,2)+"R";
 }
 
 string SignalText(const LocalSignal &signal, bool volumeOk, double volume, double riskMoney, string volumeReason) {
@@ -525,12 +593,10 @@ string SignalText(const LocalSignal &signal, bool volumeOk, double volume, doubl
       "\n━━━━━━━━━━━━━━"+
       "\n▶️ Kirish: "+Price(signal.entry)+" (bozor narxida)"+
       "\n🛑 Stop Loss: "+Price(signal.sl)+" ("+Distance(risk)+")"+
-      "\n🎯 TP1: "+Price(signal.tp1)+" ("+DoubleToString(TP1_R,2)+"R, +"+Distance(risk*TP1_R)+") → "+
-         DoubleToString(TP1ClosePercent,0)+"% yopiladi"+(MoveSLAfterTP ? ", SL → Entry (zararsiz)" : "")+
-      "\n🎯 TP2: "+Price(signal.tp2)+" ("+DoubleToString(TP2_R,2)+"R, +"+Distance(risk*TP2_R)+") → "+
-         DoubleToString(TP2ClosePercent,0)+"% yopiladi"+(MoveSLAfterTP ? ", SL → TP1" : "")+
-      "\n🏁 TP3 asosiy: "+Price(signal.tp3)+" ("+DoubleToString(TP3_R,2)+"R, +"+Distance(risk*TP3_R)+") → qolgan "+
-         (string)pct3+"% (brokerga qo'yiladi)"+
+      "\n🎯 TP1: "+Price(signal.tp1)+" ("+DoubleToString(TP1_R,2)+"R, +"+Distance(risk*TP1_R)+") → "+TPAction(0)+
+      "\n🎯 TP2: "+Price(signal.tp2)+" ("+DoubleToString(TP2_R,2)+"R, +"+Distance(risk*TP2_R)+") → "+TPAction(1)+
+      "\n🏁 TP3 asosiy: "+Price(signal.tp3)+" ("+DoubleToString(TP3_R,2)+"R, +"+Distance(risk*TP3_R)+") → "+
+         (UsePartialTP ? "qolgan "+(string)pct3+"%" : "butun lot")+" (brokerga qo'yiladi)"+
       "\n━━━━━━━━━━━━━━";
    if(volumeOk) {
       double balance=AccountInfoDouble(ACCOUNT_BALANCE);
@@ -565,13 +631,14 @@ void Panel() {
    for(int k=0;k<TFCount;k++) frames+="\n  "+TFName(TFList[k])+": "+TFStatus[k];
    Comment("AI Zone Trader 5 | ",_Symbol," | TF: ",ScanList()," | ",connection,
       "\nRejim: ",ModeName(),
-      "\nRisk: ",DoubleToString(MaxRiskPercent,1),"% | TP: ",DoubleToString(TP1ClosePercent,0),"% @",DoubleToString(TP1_R,2),
-      "R, ",DoubleToString(TP2ClosePercent,0),"% @",DoubleToString(TP2_R,2),"R, rest @",DoubleToString(TP3_R,2),"R",
+      "\nRisk: ",DoubleToString(MaxRiskPercent,1),"% | Chiqish: ",(UsePartialTP ? "qismlab " : "1:"),
+      (UsePartialTP ? ExitPlanText() : DoubleToString(TP3_R,1)+" (butun lot TP3 gacha)"),
       "\nAI: ",AZTAIStatus(),(AITestStatus!="" ? "\nAI test: "+AITestStatus : ""),
       "\n",(JournalTF>=0 && JournalTF<TFCount ? "["+TFName(TFList[JournalTF])+"] " : ""),JournalScore(AZT_AI_CLAUDE),
       Pending.active ? "\nTELEGRAM TASDIG'I KUTILMOQDA: "+Pending.id : "",
       "\nTimeframe'lar:",frames,
       "\nTekshiruv: ",(RequireAllChecks ? "barcha omillar" : "ball")," + ",(MTFFilter ? "yuqori TF" : "MTF o'chiq"),
+      " + ",(string)MinFamilies,"/11 strategiya oilasi",
       " + ",(RequireAIApproval ? "Claude APPROVE >= "+(string)MinAIConfidence+"%" : "AI ixtiyoriy"),
       "\nSpread: ",spread," | Order limit: ",DoubleToString(MaxSpreadPoints,1),
       "\nLast signal: ",LastSignal,
@@ -717,11 +784,13 @@ void ManagePositions() {
       GlobalVariableSet(key+".s",stage+1); // once per stage, even if the broker refuses
       GlobalVariablesFlush();
       string message="🎯 TP"+(string)(stage+1)+" | "+_Symbol+" #"+(string)ticket+" narx "+Price(price);
-      double part=PartVolume(initial,stage==0 ? TP1ClosePercent : TP2ClosePercent,volume);
-      if(part>0) {
-         if(Trade.PositionClosePartial(ticket,part)) message+="\n✅ "+Lots(part)+" lot yopildi (foyda olindi)";
-         else message+="\n⚠️ Qisman yopilmadi: "+Trade.ResultRetcodeDescription();
-      } else message+="\nℹ️ Lot kichik, qism yopilmadi";
+      if(UsePartialTP) {
+         double part=PartVolume(initial,stage==0 ? TP1ClosePercent : TP2ClosePercent,volume);
+         if(part>0) {
+            if(Trade.PositionClosePartial(ticket,part)) message+="\n✅ "+Lots(part)+" lot yopildi (foyda olindi)";
+            else message+="\n⚠️ Qisman yopilmadi: "+Trade.ResultRetcodeDescription();
+         } else message+="\nℹ️ Lot kichik, qism yopilmadi";
+      }
       if(MoveSLAfterTP) {
          double newSL=TickPrice(stage==0 ? open : open+side*r*TP1_R,side);
          double minStop=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
@@ -835,6 +904,15 @@ void ScanTF() {
    LocalSignal signal; string reason;
    if(!EvaluateSignal(1,signal,reason) || !StrictChecks(1,signal,reason)) { Status=reason; Print("AZT ",TFName(TF),": ",Status); return; }
    if(CoolingDown(1)) { Status="Waiting: signal cooldown"; return; }
+   // Quant gate: these exact rules lost money on this timeframe's recent history -> no live signal.
+   if(MinHistorySamples>0 && HistoryTrades>=MinHistorySamples && HistoryExpectancyR<MinHistoryExpectancyR) {
+      Status="Skipped "+signal.setup+": "+TFName(TF)+" tarixida o'rtacha "+DoubleToString(HistoryExpectancyR,2)+"R ("+
+             (string)HistoryTrades+" ta) < "+DoubleToString(MinHistoryExpectancyR,2)+"R";
+      Print("AZT ",TFName(TF),": ",Status); return;
+   }
+   if(HistoryTrades>0)
+      signal.factors+="\n"+(HistoryExpectancyR>0 ? "✅ " : "• ")+"Tarix ("+TFName(TF)+", "+(string)HistoryTrades+" ta): o'rtacha "+
+                      DoubleToString(HistoryExpectancyR,2)+"R";
    LastSignalBar=signal.time;
    SetupCount++;
    DrawSignal(signal,false);
@@ -1106,7 +1184,7 @@ void SwitchTF(int k) {
       SaveTF();
       TFIndex=k; TF=TFList[k];
       FastHandle=TFFast[k]; SlowHandle=TFSlow[k]; RSIHandle=TFRSI[k]; ATRHandle=TFATR[k];
-      MACDHandle=TFMACD[k]; TrendMAHandle=TFTrendMA[k];
+      MACDHandle=TFMACD[k]; TrendMAHandle=TFTrendMA[k]; StochHandle=TFStoch[k]; ADXHandle=TFADX[k];
       LastClosedBar=TFLastClosed[k]; LastSignalBar=TFLastSignal[k]; Ready=TFReady[k];
       Status=TFStatus[k]; HistoryStatus=TFHistory[k]; HistoricalSignals=TFHistSignals[k];
       DrawEnabled=TF==(ENUM_TIMEFRAMES)_Period;
@@ -1150,6 +1228,7 @@ void Heartbeat() {
       "\nTimeframe'lar:"+frames+
       "\nHozirgi trend: "+MTFMatrix()+
       "\nTekshiruv: "+(RequireAllChecks ? "barcha omillar" : "konfluens bali")+(MTFFilter ? " + yuqori TF" : "")+
+      " + kamida "+(string)MinFamilies+"/11 strategiya oilasi"+
       (RequireAIApproval ? " + Claude APPROVE >= "+(string)MinAIConfidence+"%" : "")+
       "\nAI: "+AZTAIStatus();
    if(!first) text+="\nOxirgi "+(string)HeartbeatHours+" soatda: setup "+(string)SetupCount+", yuborilgan signal "+
@@ -1192,6 +1271,13 @@ int OnInit() {
       SNRZoneATR<=0 || SNRMinTouches<2 || MinConfluence<-10 || MinConfluence>10) {
       Print("AZT: Invalid input parameters"); return INIT_PARAMETERS_INCORRECT;
    }
+   if(MinFamilies<0 || MinFamilies>11 || SweepBars<1 || SweepBars>20 || PDRangeBars<10 || PDRangeBars>1000 ||
+      RangeBars<3 || RangeBars>100 || RangeMaxATR<=0 || StochK<2 || StochD<1 || StochSlowing<1 ||
+      ADXPeriod<2 || ADXPeriod>200 || MinADX<0 || VolumeAvgBars<3 || VolumeAvgBars>500 || VolumeSpike<=1 ||
+      SessionStartGMT<0 || SessionStartGMT>23 || SessionEndGMT<0 || SessionEndGMT>24 || SessionStartGMT==SessionEndGMT ||
+      VolatilityBars<20 || VolatilityBars>1000 || MaxSpreadRiskPercent<=0 || SniperMaxZoneATR<=0 || MinHistorySamples<0) {
+      Print("AZT: Invalid input parameters (strategiya oilalari)"); return INIT_PARAMETERS_INCORRECT;
+   }
    if(MTFMinAgreePercent<0 || MTFMinAgreePercent>100 || MinAIConfidence<0 || MinAIConfidence>100 ||
       HeartbeatHours<0 || HeartbeatHours>168 || !BuildTimeframeList()) {
       Print("AZT: Invalid input parameters (ScanTimeframes / MTF / AI / Heartbeat)"); return INIT_PARAMETERS_INCORRECT;
@@ -1201,10 +1287,13 @@ int OnInit() {
    ArraySetAsSeries(Rates,true); ArraySetAsSeries(Fast,true); ArraySetAsSeries(Slow,true);
    ArraySetAsSeries(RSI,true); ArraySetAsSeries(ATR,true);
    ArraySetAsSeries(MACDMain,true); ArraySetAsSeries(MACDSignal,true); ArraySetAsSeries(TrendMA,true);
+   ArraySetAsSeries(StochMain,true); ArraySetAsSeries(StochSignal,true);
+   ArraySetAsSeries(ADXMain,true); ArraySetAsSeries(ADXPlus,true); ArraySetAsSeries(ADXMinus,true);
    // A failed init must not leave handles of the previous run for OnDeinit to release.
    for(int k=0;k<AZT_MAX_TF;k++) {
       TFFast[k]=INVALID_HANDLE; TFSlow[k]=INVALID_HANDLE; TFRSI[k]=INVALID_HANDLE;
       TFATR[k]=INVALID_HANDLE; TFMACD[k]=INVALID_HANDLE; TFTrendMA[k]=INVALID_HANDLE;
+      TFStoch[k]=INVALID_HANDLE; TFADX[k]=INVALID_HANDLE;
    }
    for(int k=0;k<TFCount;k++) {
       ENUM_TIMEFRAMES tf=TFList[k];
@@ -1213,10 +1302,12 @@ int OnInit() {
       TFRSI[k]=iRSI(_Symbol,tf,RSIPeriod,PRICE_CLOSE); TFATR[k]=iATR(_Symbol,tf,ATRPeriod);
       TFMACD[k]=iMACD(_Symbol,tf,MACDFast,MACDSlow,MACDSignalPeriod,PRICE_CLOSE);
       TFTrendMA[k]=iMA(_Symbol,tf,TrendMAPeriod,0,MODE_SMA,PRICE_CLOSE);
+      TFStoch[k]=iStochastic(_Symbol,tf,StochK,StochD,StochSlowing,MODE_SMA,STO_LOWHIGH);
+      TFADX[k]=iADX(_Symbol,tf,ADXPeriod);
       TFLastClosed[k]=0; TFLastSignal[k]=0; TFReady[k]=false;
       TFStatus[k]="Starting"; TFHistory[k]="History analysis pending"; TFHistSignals[k]=0;
       if(TFFast[k]==INVALID_HANDLE || TFSlow[k]==INVALID_HANDLE || TFRSI[k]==INVALID_HANDLE || TFATR[k]==INVALID_HANDLE ||
-         TFMACD[k]==INVALID_HANDLE || TFTrendMA[k]==INVALID_HANDLE) {
+         TFMACD[k]==INVALID_HANDLE || TFTrendMA[k]==INVALID_HANDLE || TFStoch[k]==INVALID_HANDLE || TFADX[k]==INVALID_HANDLE) {
          Print("AZT: Cannot create indicators for ",TFName(tf),": ",GetLastError()); return INIT_FAILED;
       }
    }
@@ -1252,6 +1343,8 @@ void OnDeinit(const int reason) {
       if(TFATR[k]!=INVALID_HANDLE) IndicatorRelease(TFATR[k]);
       if(TFMACD[k]!=INVALID_HANDLE) IndicatorRelease(TFMACD[k]);
       if(TFTrendMA[k]!=INVALID_HANDLE) IndicatorRelease(TFTrendMA[k]);
+      if(TFStoch[k]!=INVALID_HANDLE) IndicatorRelease(TFStoch[k]);
+      if(TFADX[k]!=INVALID_HANDLE) IndicatorRelease(TFADX[k]);
    }
    TFCount=0;
    for(int i=0;i<4;i++) if(HTFHandles[i]!=INVALID_HANDLE) { IndicatorRelease(HTFHandles[i]); HTFHandles[i]=INVALID_HANDLE; }

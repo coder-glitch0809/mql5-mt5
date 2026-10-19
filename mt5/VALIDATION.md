@@ -27,6 +27,19 @@ Fixes after 5.00 review (not compiled yet either; compile and run the tests as a
 - `AZT_signals_v5.csv` is written as UTF-8; Claude prompt, journal memory and lessons use the configured TP R values.
 - Failed OnInit no longer leaves stale indicator handles for OnDeinit.
 
+EA 5.10 (not compiled yet; compile and run the tests as above):
+- New `AZT_Strategies.mqh`, which `Install-MT5.ps1` now copies too. It adds SMC/ICT liquidity sweeps and
+  premium/discount, range breakouts, morning/evening star, inside bar, three soldiers/crows, HH/HL structure,
+  Stochastic, ADX, tick-volume spikes and a volatility-regime filter.
+- `StrategyGates` (called from `StrictChecks`, so live signals and the history replay both use it) applies the
+  London/New York session filter on M5/M15, a spread/SL cost limit and a sniper limit on how far price is from the
+  zone. It then requires `MinFamilies` (default 5) of the 11 strategy families to confirm.
+- Live quant gate: no signal when this timeframe's replay has `MinHistorySamples`+ results and expectancy
+  < `MinHistoryExpectancyR`.
+- `UsePartialTP=false` (default): the whole lot runs to TP3 = 3R (1:3) and the stop trails to entry/TP1.
+  `test_mt5_structure_history` expectations now depend on this input.
+- Defaults tightened: RSI 50–65 / 35–50, `MTFMinAgreePercent` 67.
+
 ---
 
 Current revision: Claude-only. Earlier runtime results below predate this change.

@@ -42,7 +42,8 @@ void OnStart() {
    Check(AZTPositionSlotAvailable(1,0,3,false,false),"netting allows another symbol within cap");
    LocalSignal signal; string reason;
    Fixture();
-   Check(TradeMode==AZT_SIGNALS_ONLY && TP3_R>=3.0,"default mode sends verified signals only and targets 1:3");
+   Check(TradeMode==AZT_SIGNALS_ONLY && TP3_R>=3.0 && !UsePartialTP && MathAbs(PlanFullR()-TP3_R)<1e-9,
+      "default mode sends verified signals only and the whole lot targets 1:3");
    Check(RequireAllChecks && MTFFilter && RequireAIApproval && MinAIConfidence>=50,"strict checks and Claude approval on by default");
    Check(EvaluateSignal(1,signal,reason) && signal.side==1 && signal.setup=="EMA pullback","BUY pullback");
    Check(signal.sl<signal.entry && signal.entry<signal.tp1 && signal.tp1<=signal.tp2 && signal.tp2<=signal.tp3,"BUY SL/TP direction");
@@ -96,7 +97,11 @@ void OnStart() {
    TFCount=0; // no indicator handles in this test: MTF has no higher-timeframe data
    // Strict gate: an opposing factor blocks the signal; without higher-TF data MTF does not block.
    Fixture();
-   Check(EvaluateSignal(1,signal,reason) && signal.against==0 && StrictChecks(1,signal,reason),"clean signal passes strict checks");
+   bool strictOk=EvaluateSignal(1,signal,reason) && signal.against==0 && StrictChecks(1,signal,reason);
+   Check(strictOk==(signal.families>=MinFamilies) && (strictOk || StringFind(reason,"strategiya oilasi")>=0),
+      "clean signal passes strict checks only with enough strategy families ("+(string)signal.families+")");
+   Check(StringFind(signal.factors,"Strategiya oilalari")>=0 && StringFind(signal.factors,"Indikatorlar")>=0,
+      "confirming strategy families are listed in the signal");
    signal.against=1;
    Check(!StrictChecks(1,signal,reason) && StringFind(reason,"qarshi")>=0,"opposing factor blocks signal (RequireAllChecks)");
    // A higher timeframe without data must block, not silently pass the MTF filter.

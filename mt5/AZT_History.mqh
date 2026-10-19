@@ -20,6 +20,7 @@ int HistoryPending=0, HistorySkipped=0;
 double HistoryTotalR=0, HistoryExpectancyR=0;
 
 double PlanFraction(int part) {
+   if(!UsePartialTP) return part==2 ? 1.0 : 0.0; // whole position runs to TP3
    if(part==0) return TP1ClosePercent/100.0;
    if(part==1) return TP2ClosePercent/100.0;
    return 1.0-(TP1ClosePercent+TP2ClosePercent)/100.0;
