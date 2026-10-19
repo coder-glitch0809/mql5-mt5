@@ -38,6 +38,7 @@ void BlockFixture() {
    Rates[5].open=103; Rates[5].close=105; Rates[5].high=106; Rates[5].low=101;
 }
 void OnStart() {
+   AZTSelectSymbol(_Symbol);
    int side; string setup,reason; double anchor;
    BlockFixture();
    StructureCheck(!ConfirmedPivot(20,18,true),"pivot cannot confirm before right-hand candles close");

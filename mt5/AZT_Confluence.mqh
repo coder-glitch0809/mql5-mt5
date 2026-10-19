@@ -130,7 +130,7 @@ bool EvaluateConfluence(int shift, int side, double entry, double sl, int &score
       if(m0!=EMPTY_VALUE && m1!=EMPTY_VALUE && s0!=EMPTY_VALUE) {
          int vote=(m0>s0 && m0>m1) ? 1 : (m0<s0 && m0<m1) ? -1 : 0;
          AddFactor(factors,score,vote*side,"MACD "+(vote==1 ? "bullish" : vote==-1 ? "bearish" : "neytral")+
-            " ("+DoubleToString(m0,_Digits+1)+" / signal "+DoubleToString(s0,_Digits+1)+")",AZT_F_IND);
+            " ("+DoubleToString(m0,SymDigits+1)+" / signal "+DoubleToString(s0,SymDigits+1)+")",AZT_F_IND);
       }
    }
    double ma=ArrayAt(TrendMA,shift);

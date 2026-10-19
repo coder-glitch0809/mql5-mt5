@@ -34,6 +34,7 @@ void Fixture(bool buy=true) {
    }
 }
 void OnStart() {
+   AZTSelectSymbol(_Symbol);
    Check(AZTPositionSlotAvailable(1,0,3,true,true),"hedging allows second signal on same symbol");
    Check(AZTPositionSlotAvailable(2,0,3,true,true),"hedging allows third position");
    Check(!AZTPositionSlotAvailable(3,0,3,true,true),"fourth position blocked at cap");
@@ -42,8 +43,9 @@ void OnStart() {
    Check(AZTPositionSlotAvailable(1,0,3,false,false),"netting allows another symbol within cap");
    LocalSignal signal; string reason;
    Fixture();
-   Check(TradeMode==AZT_SIGNALS_ONLY && TP3_R>=3.0 && !UsePartialTP && MathAbs(PlanFullR()-TP3_R)<1e-9,
-      "default mode sends verified signals only and the whole lot targets 1:3");
+   Check(TradeMode==AZT_SIGNALS_ONLY && TP3_R>=3.0 && UsePartialTP && BreakevenLockR>0 && BreakevenLockR<TP1_R,
+      "default: verified signals only, profit taken at TP1, rest locked beyond entry");
+   Check(MaxOpenPositions==10 && MaxPendingOrders==10 && EntryMode==AZT_ENTRY_BOTH,"10 positions and 10 limit orders, market + limit");
    Check(RequireAllChecks && MTFFilter && RequireAIApproval && MinAIConfidence>=50,"strict checks and Claude approval on by default");
    Check(EvaluateSignal(1,signal,reason) && signal.side==1 && signal.setup=="EMA pullback","BUY pullback");
    Check(signal.sl<signal.entry && signal.entry<signal.tp1 && signal.tp1<=signal.tp2 && signal.tp2<=signal.tp3,"BUY SL/TP direction");
@@ -90,7 +92,7 @@ void OnStart() {
    // Multi-timeframe list: parsed, sorted, de-duplicated.
    ENUM_TIMEFRAMES parsed;
    Check(ParseTimeframe(" h4 ",parsed) && parsed==PERIOD_H4 && !ParseTimeframe("X9",parsed),"timeframe names parse");
-   Check(BuildTimeframeList() && TFCount==6 && TFList[0]==PERIOD_M5 && TFList[5]==PERIOD_D1,"default scan list M5..D1");
+   Check(BuildTimeframeList() && TFCount==8 && TFList[0]==PERIOD_M1 && TFList[7]==PERIOD_W1,"default scan list M1..W1");
    bool ascending=true;
    for(int k=1;k<TFCount;k++) if(PeriodSeconds(TFList[k])<=PeriodSeconds(TFList[k-1])) ascending=false;
    Check(ascending,"scan list sorted from lowest to highest timeframe");
@@ -102,6 +104,11 @@ void OnStart() {
       "clean signal passes strict checks only with enough strategy families ("+(string)signal.families+")");
    Check(StringFind(signal.factors,"Strategiya oilalari")>=0 && StringFind(signal.factors,"Indikatorlar")>=0,
       "confirming strategy families are listed in the signal");
+   Fixture();
+   Check(EvaluateSignal(1,signal,reason) && signal.limit>0 && signal.limit<signal.entry && signal.limit>signal.sl &&
+      signal.ltp1>signal.limit && signal.ltp3>signal.ltp2,"BUY LIMIT sits between SL and entry with its own targets");
+   signal.histRate=60; signal.histSamples=30;
+   Check(AccuracyPercent(signal,80)==70 && AccuracyPercent(signal,0)==60,"accuracy = history TP1 rate, averaged with Claude");
    signal.against=1;
    Check(!StrictChecks(1,signal,reason) && StringFind(reason,"qarshi")>=0,"opposing factor blocks signal (RequireAllChecks)");
    // A higher timeframe without data must block, not silently pass the MTF filter.

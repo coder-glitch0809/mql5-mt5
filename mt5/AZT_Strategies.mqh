@@ -120,6 +120,49 @@ void EvaluateStrategies(int shift, int side, double entry, int &score, string &f
    }
 }
 
+// ---- Asset classes ------------------------------------------------------------------
+// The broker decides what exists; the class only changes session rules and wording.
+#define AZT_ASSET_FOREX 0
+#define AZT_ASSET_CRYPTO 1
+#define AZT_ASSET_INDEX 2
+#define AZT_ASSET_STOCK 3
+#define AZT_ASSET_BOND 4
+#define AZT_ASSET_COMMODITY 5
+#define AZT_ASSET_OTHER 6
+
+bool AZTHasAny(const string text, const string &words[]) {
+   for(int i=0;i<ArraySize(words);i++) if(StringFind(text,words[i])>=0) return true;
+   return false;
+}
+
+int AssetClass() {
+   string text=SymbolInfoString(Sym,SYMBOL_PATH)+"|"+Sym;
+   StringToLower(text);
+   string crypto[]={"crypto","btc","eth","xrp","ltc","doge","bitcoin","usdt"};
+   string commodity[]={"metal","xau","xag","xpt","xpd","gold","silver","oil","brent","wti","ngas","natgas","commod",
+                       "energ","agri","copper","corn","wheat","soy","coffee","sugar","cocoa","cotton"};
+   string bond[]={"bond","treasur","bund","gilt","t-note","tnote"};
+   string stock[]={"stock","share","equit"};
+   string index[]={"indic","index","us30","us500","us100","nas100","spx","sp500","dax","ger40","de40","uk100","ftse",
+                   "jp225","nikkei","dow","stoxx","hk50","aus200","cac","fra40","vix"};
+   string forex[]={"forex","fx","major","minor","exotic","cross"};
+   if(AZTHasAny(text,crypto)) return AZT_ASSET_CRYPTO;
+   if(AZTHasAny(text,commodity)) return AZT_ASSET_COMMODITY;
+   if(AZTHasAny(text,bond)) return AZT_ASSET_BOND;
+   if(AZTHasAny(text,stock)) return AZT_ASSET_STOCK;
+   if(AZTHasAny(text,index)) return AZT_ASSET_INDEX;
+   long mode=SymbolInfoInteger(Sym,SYMBOL_TRADE_CALC_MODE);
+   if(mode==SYMBOL_CALC_MODE_FOREX || mode==SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE || AZTHasAny(text,forex)) return AZT_ASSET_FOREX;
+   if(mode==SYMBOL_CALC_MODE_EXCH_STOCKS) return AZT_ASSET_STOCK;
+   return AZT_ASSET_OTHER;
+}
+
+string AssetName(int asset) {
+   return asset==AZT_ASSET_FOREX ? "💱 Forex" : asset==AZT_ASSET_CRYPTO ? "🪙 Kriptovalyuta" :
+          asset==AZT_ASSET_INDEX ? "📈 Fond indeksi" : asset==AZT_ASSET_STOCK ? "🏢 Aksiya" :
+          asset==AZT_ASSET_BOND ? "📜 Obligatsiya" : asset==AZT_ASSET_COMMODITY ? "🛢 Tovar / metall" : "📊 Boshqa aktiv";
+}
+
 // GMT hour when the candle that opened at `opened` closed. Broker offset is taken from the live clock.
 int CloseHourGMT(datetime opened) {
    long offset=(long)(TimeCurrent()-TimeGMT());
@@ -136,13 +179,18 @@ bool StrategyGates(int shift, LocalSignal &signal, string &reason) {
    int hour=CloseHourGMT(Rates[shift].time);
    bool active=SessionStartGMT<SessionEndGMT ? (hour>=SessionStartGMT && hour<SessionEndGMT)
                                              : (hour>=SessionStartGMT || hour<SessionEndGMT);
+   // London/New York liquidity matters for FX and metals; crypto trades 24/7 and exchange
+   // instruments (stocks, indices, bonds) only print candles while their own market is open.
+   int asset=AssetClass();
+   bool sessionBound=asset==AZT_ASSET_FOREX || asset==AZT_ASSET_COMMODITY || asset==AZT_ASSET_OTHER;
+   if(!sessionBound) active=true;
    if(UseSessionFilter && scalping && !active) {
       reason="Skipped "+signal.setup+": London/New York sessiyasidan tashqari (GMT "+(string)hour+":00)"; return false;
    }
-   if(active) AddInfo(signal.factors,"Sessiya: London/New York (GMT "+(string)hour+":00)",AZT_F_SESSION);
+   if(active) AddInfo(signal.factors,sessionBound ? "Sessiya: London/New York (GMT "+(string)hour+":00)" : "Sessiya: bozor ochiq",AZT_F_SESSION);
 
    double risk=MathAbs(signal.entry-signal.sl);
-   double spread=(double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)*_Point;
+   double spread=(double)SymbolInfoInteger(Sym,SYMBOL_SPREAD)*SymPoint;
    if(risk>0 && spread>risk*MaxSpreadRiskPercent/100.0) {
       reason="Skipped "+signal.setup+": spread SL masofasining "+DoubleToString(100.0*spread/risk,0)+"%i (ruxsat "+
              DoubleToString(MaxSpreadRiskPercent,0)+"%)"; return false;

@@ -27,6 +27,18 @@ Fixes after 5.00 review (not compiled yet either; compile and run the tests as a
 - `AZT_signals_v5.csv` is written as UTF-8; Claude prompt, journal memory and lessons use the configured TP R values.
 - Failed OnInit no longer leaves stale indicator handles for OnDeinit.
 
+EA 5.20 (not compiled yet; compile and run the tests as above):
+- One EA instance scans every Market Watch symbol (`ScanSymbols`, `MaxSymbols`) on `M1,M5,M15,M30,H1,H4,D1,W1`.
+  Code uses `Sym`/`SymPoint`/`SymDigits` (AZT_Json.mqh) instead of `_Symbol`/`_Point`/`_Digits`; state is per
+  slot = symbol x timeframe (`SwitchSlot`). Tests call `AZTSelectSymbol(_Symbol)` first.
+- First history load is throttled to 4 slots per scan; the rule replay refreshes every `HistoryRefreshBars` candles.
+- `EntryMode` market / limit / both; BUY/SELL LIMIT at the zone with its own targets, cancelled after
+  `LimitExpiryBars`; `MaxOpenPositions` 10, `MaxPendingOrders` 10. Position records are scoped by magic only.
+- Accuracy %: TP1 hit rate of the rules on that symbol/TF (averaged with Claude's confidence); `MinAccuracyPercent` gate.
+- Default exit back to partial TP1 (50%) with the stop locked at entry + `BreakevenLockR` (0.1R).
+- Asset class (forex, crypto, index, stock, bond, commodity) from the symbol path; London/NY session filter only for FX/metals.
+- Telegram photo caption: one value per line with emojis.
+
 EA 5.10 (not compiled yet; compile and run the tests as above):
 - New `AZT_Strategies.mqh`, which `Install-MT5.ps1` now copies too. It adds SMC/ICT liquidity sweeps and
   premium/discount, range breakouts, morning/evening star, inside bar, three soldiers/crows, HH/HL structure,

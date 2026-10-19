@@ -201,7 +201,7 @@ bool AZTTelegramRequestTest() {
    }
    return AZTTelegramQueue(key,
       "AZT MT5 — TEST XABARI\nTelegram aloqasi ishlayapti.\nBu savdo signali emas; order ochilmaydi.\n"
-      "Manba: MetaTrader 5\n"+_Symbol+" | "+TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS),120);
+      "Manba: MetaTrader 5\n"+Sym+" | "+TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS),120);
 }
 
 bool AZTTelegramInit() {

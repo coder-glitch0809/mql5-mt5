@@ -3,8 +3,8 @@
 // -> all classic checks + higher-timeframe alignment -> Claude review (it learns from
 // its own record) -> only verified signals go to Telegram -> optional order with SL and 3-part TP.
 #property strict
-#property version "5.10"
-#property description "Multi-timeframe MT5 signals: 11 strategy families + every check + Claude review before Telegram. SL and TP3 at 1:3 (stop trails to entry, then TP1)."
+#property version "5.20"
+#property description "One chart scans every Market Watch symbol on M1..W1: 11 strategy families + Claude review before Telegram. Market + limit entries, TP1 profit locked."
 #include <Trade/Trade.mqh>
 
 enum AZTTradeMode {
@@ -13,10 +13,20 @@ enum AZTTradeMode {
    AZT_AI_HYBRID=2       // Claude tasdiqlasa o'zi kiradi, aks holda sizdan so'raydi
 };
 
+enum AZTEntryMode {
+   AZT_ENTRY_MARKET=0,   // Faqat bozor narxida
+   AZT_ENTRY_LIMIT=1,    // Faqat BUY LIMIT / SELL LIMIT (zonada kutadi)
+   AZT_ENTRY_BOTH=2      // Bozor narxida + zonada limit order
+};
+
 input group "1. Savdo rejimi"
 input AZTTradeMode TradeMode = AZT_SIGNALS_ONLY; // Standart: faqat tekshirilgan signal Telegram'ga, savdo yo'q
 input int ApprovalTimeoutMinutes = 15;  // Javob bo'lmasa signal bekor
 input bool SkipWhenAIRejects = true;    // AI rad etsa: savdo ham, tugma ham yo'q
+
+input AZTEntryMode EntryMode = AZT_ENTRY_BOTH; // Savdo ochilganda: bozor, limit yoki ikkalasi
+input double LimitOffsetATR = 0.3;      // Limit narx: zona chegarasi, kamida shuncha ATR bozor narxidan uzoqda
+input int LimitExpiryBars = 12;         // Limit order shuncha sham ichida ochilmasa bekor qilinadi
 
 input group "2. Risk (kichik hisob uchun ham)"
 input double MaxRiskPercent = 1.0;       // Har savdoda balansdan risk, %
@@ -24,8 +34,9 @@ input double MinLotMaxRiskPercent = 3.0; // Kichik hisob: min lot riski shu %gac
 input double MaxDailyLossPercent = 3.0;
 input double MaxDrawdownPercent = 10.0;
 input int MaxConsecutiveLosses = 3;
-input int MaxOpenPositions = 3;          // Hisob bo'yicha pozitsiya + kutilayotgan orderlar
-input double MaxSpreadPoints = 25.0;     // Broker point birligida
+input int MaxOpenPositions = 10;         // Hisob bo'yicha ochiq pozitsiyalar
+input int MaxPendingOrders = 10;         // Shu EA'ning kutilayotgan limit orderlari
+input double MaxSpreadPoints = 0;        // Broker point birligida (0 = o'chiq; spread SL ga nisbatan tekshiriladi)
 input double MaxEntryDriftATR = 0.5;     // Narx signaldan shuncha ATR qochsa kirmaydi
 input int SlippagePoints = 30;
 input ulong MagicNumber = 260916;
@@ -40,7 +51,8 @@ input double TP2_R = 2.25;               // TP2 = yo'lning 75%i
 input double TP2ClosePercent = 25;       // TP2 da yopiladigan qism, %
 input double TP3_R = 3.0;                // Asosiy TP = risk x3 (brokerga qo'yiladi)
 input bool MoveSLAfterTP = true;         // TP1 dan keyin SL -> Entry, TP2 dan keyin SL -> TP1
-input bool UsePartialTP = false;         // false: butun lot TP3 (1:3) gacha, true: 50%/25%/25% qismlab yopish
+input bool UsePartialTP = true;          // true: TP1 da 50% foyda olinadi, qolgani zararsiz; false: butun lot TP3 gacha
+input double BreakevenLockR = 0.1;       // TP1 dan keyin SL = Entry + shuncha R (spread/komissiya TP1 foydasini yemaydi)
 
 input group "4. Signal qoidalari"
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
@@ -87,7 +99,11 @@ input bool UseFibonacci = true;          // 50-78.6% qaytish zonasi
 input bool UsePatterns = true;           // Engulfing, pin bar, double top/bottom
 
 input group "4c. Barcha timeframe'lar va qat'iy tekshiruv"
-input string ScanTimeframes = "M5,M15,M30,H1,H4,D1"; // Bitta chartdan shu TF'lar skanerlanadi (bo'sh = faqat SignalTimeframe)
+input string ScanTimeframes = "M1,M5,M15,M30,H1,H4,D1,W1"; // Har symbolda shu TF'lar skanerlanadi (bo'sh = faqat SignalTimeframe)
+input string ScanSymbols = "";           // Bo'sh = Market Watch'dagi barcha symbollar; yoki "EURUSD,XAUUSD,BTCUSD,US30"
+input int MaxSymbols = 12;               // Ko'pi bilan shuncha symbol (har biri x TF soni indikator yuklaydi)
+input int MinAccuracyPercent = 50;       // Shu symbol/TF tarixida TP1 ga yetganlar shundan kam bo'lsa signal yo'q (0 = o'chiq)
+input int HistoryRefreshBars = 20;       // Tarixiy statistika har shuncha yangi shamda qayta hisoblanadi
 input bool MTFFilter = true;             // Yuqori TF trendi signalga qarshi bo'lsa signal yo'q
 input int MTFMinAgreePercent = 67;       // Yuqori TF'larning kamida shuncha %i signal yo'nalishida bo'lsin
 input bool RequireAllChecks = true;      // Konfluensda bitta ham qarshi (⚠️) omil bo'lmasin
@@ -147,7 +163,6 @@ int FastHandle=INVALID_HANDLE, SlowHandle=INVALID_HANDLE;
 int RSIHandle=INVALID_HANDLE, ATRHandle=INVALID_HANDLE;
 int MACDHandle=INVALID_HANDLE, TrendMAHandle=INVALID_HANDLE;
 int StochHandle=INVALID_HANDLE, ADXHandle=INVALID_HANDLE;
-int HTFHandles[4]={INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE,INVALID_HANDLE};
 ENUM_TIMEFRAMES TF;
 MqlRates Rates[];
 double Fast[], Slow[], RSI[], ATR[], MACDMain[], MACDSignal[], TrendMA[];
@@ -157,19 +172,29 @@ bool Ready=false;
 string Prefix, PosScope, Status="Starting", LastSignal="none", TradeStatus="", AITestStatus="";
 int HistoricalSignals=0;
 
-// ---- Multi-timeframe state ---------------------------------------------------
-// Every timeframe has its own indicator handles and scan state. SwitchTF() loads one
-// timeframe into the globals that the rest of the EA (structure, confluence, journal) reads.
+// ---- Multi-symbol, multi-timeframe state -------------------------------------
+// One "slot" = one symbol x one timeframe: slot = SymIndex*TFCount + k (k = TFList index).
+// Every slot has its own indicator handles and scan state. SwitchSlot() loads one slot
+// into the globals that the rest of the EA (structure, confluence, journal) reads.
 #define AZT_MAX_TF 9
-int TFCount=0, TFIndex=-1, JournalTF=-1;
+#define AZT_MAX_SYMBOLS 30
+#define AZT_MAX_SLOTS 270
+int TFCount=0, TFIndex=-1, CurSlot=-1, JournalSlot=-1;
+int SymCount=0, SymIndex=-1;
+string SymList[AZT_MAX_SYMBOLS];
 ENUM_TIMEFRAMES TFList[AZT_MAX_TF];
-int TFFast[AZT_MAX_TF], TFSlow[AZT_MAX_TF], TFRSI[AZT_MAX_TF], TFATR[AZT_MAX_TF], TFMACD[AZT_MAX_TF], TFTrendMA[AZT_MAX_TF];
-int TFStoch[AZT_MAX_TF], TFADX[AZT_MAX_TF];
-datetime TFLastClosed[AZT_MAX_TF], TFLastSignal[AZT_MAX_TF];
-bool TFReady[AZT_MAX_TF];
-string TFStatus[AZT_MAX_TF], TFHistory[AZT_MAX_TF];
-int TFHistSignals[AZT_MAX_TF];
-bool DrawEnabled=true;                 // Only the chart's own timeframe draws objects
+int TFFast[AZT_MAX_SLOTS], TFSlow[AZT_MAX_SLOTS], TFRSI[AZT_MAX_SLOTS], TFATR[AZT_MAX_SLOTS], TFMACD[AZT_MAX_SLOTS], TFTrendMA[AZT_MAX_SLOTS];
+int TFStoch[AZT_MAX_SLOTS], TFADX[AZT_MAX_SLOTS];
+datetime TFLastClosed[AZT_MAX_SLOTS], TFLastSignal[AZT_MAX_SLOTS];
+bool TFReady[AZT_MAX_SLOTS];
+string TFStatus[AZT_MAX_SLOTS], TFHistory[AZT_MAX_SLOTS];
+int TFHistSignals[AZT_MAX_SLOTS], SlotHistTrades[AZT_MAX_SLOTS], SlotHistTP1[AZT_MAX_SLOTS], SlotHistAge[AZT_MAX_SLOTS];
+double SlotHistExp[AZT_MAX_SLOTS];
+int HTFHandles[AZT_MAX_SYMBOLS][4];    // AI context: EMA fast/slow on AIHigherTF1 and AIHigherTF2 per symbol
+bool DrawEnabled=true;                 // Only the chart's own symbol and timeframe draw objects
+
+// Slot of timeframe k for the current symbol (-1 before a symbol is selected, e.g. in unit tests).
+int Slot(int k) { return SymIndex<0 || k<0 || k>=TFCount ? -1 : SymIndex*TFCount+k; }
 int SetupCount=0, SentCount=0, FilteredCount=0; // Since the last heartbeat
 datetime NextHeartbeat=0, NextAIWarning=0, StartedAt=0;
 
@@ -190,33 +215,38 @@ struct LocalSignal {
    string factors; // One line per factor, for Telegram and the AI
    string mtf;     // Higher-timeframe trend line
    int families;   // Strategy families that confirmed the signal
+   double limit, ltp1, ltp2, ltp3; // BUY/SELL LIMIT at the zone (0 = none); targets from the limit price
+   double histRate; int histSamples; // TP1 hit rate (%) of these rules on this symbol/TF, -1 unknown
 };
 
 struct PendingApproval {
    bool active;
    string id;
    LocalSignal signal;
-   int tf;           // TFList index of the signal
+   int tf;           // Slot (symbol x timeframe) of the signal
    datetime expires; // TimeLocal
 };
 PendingApproval Pending;
 
-int RequiredBars() {
+// Bars the indicators need; structure uses whatever history exists beyond this (W1/D1 may be short).
+int IndicatorBars() {
    int indicators=MathMax(MathMax(SlowEMA*3,MACDSlow*3),MathMax(RSIPeriod,ATRPeriod)*3)+SwingLookback+3;
    indicators=MathMax(indicators,TrendMAPeriod+FVGLookback+3);
    indicators=MathMax(indicators,MathMax(MathMax(VolatilityBars,PDRangeBars),ADXPeriod*3)+ATRPeriod+3);
-   return MathMax(indicators,StructureLookback+2*PivotBars+3);
+   return indicators;
 }
+
+int RequiredBars() { return MathMax(IndicatorBars(),StructureLookback+2*PivotBars+3); }
 
 double TickPrice(double price, int direction=0) {
-   double step=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   if(step<=0) step=_Point;
+   double step=SymbolInfoDouble(Sym,SYMBOL_TRADE_TICK_SIZE);
+   if(step<=0) step=SymPoint;
    double units=price/step;
    double rounded=(direction<0 ? MathFloor(units) : direction>0 ? MathCeil(units) : MathRound(units));
-   return NormalizeDouble(rounded*step,_Digits);
+   return NormalizeDouble(rounded*step,SymDigits);
 }
 
-string Price(double value) { return DoubleToString(value,_Digits); }
+string Price(double value) { return DoubleToString(value,SymDigits); }
 
 #include "AZT_Confluence.mqh"
 #include "AZT_Strategies.mqh"
@@ -227,7 +257,7 @@ bool LoadData(int count) {
       BarsCalculated(RSIHandle)<count || BarsCalculated(ATRHandle)<count ||
       BarsCalculated(MACDHandle)<count || BarsCalculated(TrendMAHandle)<count ||
       BarsCalculated(StochHandle)<count || BarsCalculated(ADXHandle)<count) return false;
-   bool loaded=CopyRates(_Symbol,TF,0,count,Rates)==count &&
+   bool loaded=CopyRates(Sym,TF,0,count,Rates)==count &&
           CopyBuffer(FastHandle,0,0,count,Fast)==count &&
           CopyBuffer(SlowHandle,0,0,count,Slow)==count &&
           CopyBuffer(RSIHandle,0,0,count,RSI)==count &&
@@ -300,6 +330,19 @@ bool EvaluateSignal(int shift, LocalSignal &signal, string &reason) {
    int setupFamily=!structure ? AZT_F_IND : StringFind(signal.setup,"trendline")>=0 ? AZT_F_PA : AZT_F_SMC;
    FamilyFor[setupFamily]++;
    signal.against=ConfluenceAgainst;
+   // Sniper limit: wait at the zone edge (at least LimitOffsetATR better than market); targets from that price.
+   signal.limit=0; signal.ltp1=0; signal.ltp2=0; signal.ltp3=0; signal.histRate=-1; signal.histSamples=0;
+   double wanted=signal.entry-side*LimitOffsetATR*signal.atr;
+   if(signal.zoneTop>0 && signal.zoneBottom>0)
+      wanted=side==1 ? MathMin(signal.zoneTop,wanted) : MathMax(signal.zoneBottom,wanted);
+   wanted=TickPrice(wanted,-side);
+   double limitRisk=side*(wanted-signal.sl);
+   if(limitRisk>=0.5*signal.atr) {
+      signal.limit=wanted;
+      signal.ltp1=TickPrice(wanted+side*limitRisk*TP1_R,side);
+      signal.ltp2=TickPrice(wanted+side*limitRisk*TP2_R,side);
+      signal.ltp3=TickPrice(wanted+side*limitRisk*TP3_R,side);
+   }
    if(signal.score<MinConfluence) {
       reason="Skipped "+signal.setup+": confluence "+(string)signal.score+" < "+(string)MinConfluence; return false;
    }
@@ -309,7 +352,7 @@ bool EvaluateSignal(int shift, LocalSignal &signal, string &reason) {
 
 bool CoolingDown(int shift) {
    if(LastSignalBar==0 || CooldownBars==0) return false;
-   int previous=iBarShift(_Symbol,TF,LastSignalBar,true);
+   int previous=iBarShift(Sym,TF,LastSignalBar,true);
    return previous>=shift && previous-shift<CooldownBars;
 }
 
@@ -318,20 +361,21 @@ bool CoolingDown(int shift) {
 // Causal: a higher-timeframe bar still forming at `at` is never used. word="n/a" if no data.
 int TFTrendAt(int k, datetime at, string &word) {
    word="n/a";
-   if(k<0 || k>=TFCount || TFFast[k]==INVALID_HANDLE || TFSlow[k]==INVALID_HANDLE) return 0;
+   int slot=Slot(k);
+   if(slot<0 || TFFast[slot]==INVALID_HANDLE || TFSlow[slot]==INVALID_HANDLE) return 0;
    ENUM_TIMEFRAMES tf=TFList[k];
-   int shift=iBarShift(_Symbol,tf,at-1,false);
+   int shift=iBarShift(Sym,tf,at-1,false);
    if(shift<0) return 0;
    for(int guard=0;guard<3;guard++) {
-      datetime opened=iTime(_Symbol,tf,shift);
+      datetime opened=iTime(Sym,tf,shift);
       if(opened<=0) return 0;
       if(opened+PeriodSeconds(tf)<=at) break;
       shift++;
    }
    double fast[1], slow[1];
    MqlRates bar[1];
-   if(CopyBuffer(TFFast[k],0,shift,1,fast)!=1 || CopyBuffer(TFSlow[k],0,shift,1,slow)!=1 ||
-      CopyRates(_Symbol,tf,shift,1,bar)!=1 || fast[0]==EMPTY_VALUE || slow[0]==EMPTY_VALUE) return 0;
+   if(CopyBuffer(TFFast[slot],0,shift,1,fast)!=1 || CopyBuffer(TFSlow[slot],0,shift,1,slow)!=1 ||
+      CopyRates(Sym,tf,shift,1,bar)!=1 || fast[0]==EMPTY_VALUE || slow[0]==EMPTY_VALUE) return 0;
    int trend=(fast[0]>slow[0] && bar[0].close>fast[0]) ? 1 : (fast[0]<slow[0] && bar[0].close<fast[0]) ? -1 : 0;
    word=trend>0 ? "UP" : trend<0 ? "DOWN" : "MIXED";
    return trend;
@@ -395,11 +439,11 @@ bool StrictChecks(int shift, LocalSignal &signal, string &reason) {
    return StrategyGates(shift,signal,reason);
 }
 
-// "200 pt = 20.0 pips" (pips only for 3/5-digit quotes, where the term is unambiguous).
+// "200 pt = 20.0 pips" (pips only for 3/5-digit forex quotes, where the term is unambiguous).
 string Distance(double priceDistance) {
-   double points=MathAbs(priceDistance)/_Point;
+   double points=MathAbs(priceDistance)/SymPoint;
    string text=DoubleToString(points,0)+" pt";
-   if(_Digits==3 || _Digits==5) text+=" = "+DoubleToString(points/10.0,1)+" pips";
+   if((SymDigits==3 || SymDigits==5) && AssetClass()==AZT_ASSET_FOREX) text+=" = "+DoubleToString(points/10.0,1)+" pips";
    return text;
 }
 
@@ -455,8 +499,8 @@ string HTFTrendWord(int index, ENUM_TIMEFRAMES tf, string &details) {
    double fast[1], slow[1];
    MqlRates bar[1];
    details="";
-   if(HTFHandles[index*2]==INVALID_HANDLE || CopyBuffer(HTFHandles[index*2],0,1,1,fast)!=1 ||
-      CopyBuffer(HTFHandles[index*2+1],0,1,1,slow)!=1 || CopyRates(_Symbol,tf,1,1,bar)!=1) return "n/a";
+   if(SymIndex<0 || HTFHandles[SymIndex][index*2]==INVALID_HANDLE || CopyBuffer(HTFHandles[SymIndex][index*2],0,1,1,fast)!=1 ||
+      CopyBuffer(HTFHandles[SymIndex][index*2+1],0,1,1,slow)!=1 || CopyRates(Sym,tf,1,1,bar)!=1) return "n/a";
    details="close "+Price(bar[0].close)+", EMA"+(string)FastEMA+" "+Price(fast[0])+", EMA"+(string)SlowEMA+" "+Price(slow[0]);
    return (fast[0]>slow[0] && bar[0].close>fast[0]) ? "UP" : (fast[0]<slow[0] && bar[0].close<fast[0]) ? "DOWN" : "MIXED";
 }
@@ -479,13 +523,13 @@ string SignalContext() {
 // Facts only; each AI also receives its own track record and lessons.
 string BuildAIPrompt(const LocalSignal &signal) {
    MqlTick tick;
-   double spread=SymbolInfoTick(_Symbol,tick) ? (tick.ask-tick.bid)/_Point : 0;
+   double spread=SymbolInfoTick(Sym,tick) ? (tick.ask-tick.bid)/SymPoint : 0;
    double risk=MathAbs(signal.entry-signal.sl);
-   string p="Symbol: "+_Symbol+" | Signal timeframe: "+EnumToString(TF)+" | Broker time: "+TimeToString(TimeCurrent())+
+   string p="Symbol: "+Sym+" ("+AssetName(AssetClass())+") | Signal timeframe: "+EnumToString(TF)+" | Broker time: "+TimeToString(TimeCurrent())+
       "\nProposed: "+(signal.side==1 ? "BUY" : "SELL")+" | Setup: "+signal.setup+
       "\nEntry "+Price(signal.entry)+" | SL "+Price(signal.sl)+" | TP1 ("+DoubleToString(TP1_R,2)+"R) "+Price(signal.tp1)+
       " | TP2 ("+DoubleToString(TP2_R,2)+"R) "+Price(signal.tp2)+" | TP3 ("+DoubleToString(TP3_R,2)+"R) "+Price(signal.tp3)+
-      " | Risk "+DoubleToString(risk/_Point,0)+" points = "+DoubleToString(risk/MathMax(signal.atr,_Point),2)+" ATR"+
+      " | Risk "+DoubleToString(risk/SymPoint,0)+" points = "+DoubleToString(risk/MathMax(signal.atr,SymPoint),2)+" ATR"+
       "\nLast closed candle: ATR("+(string)ATRPeriod+") "+Price(ATR[1])+" | EMA"+(string)FastEMA+" "+Price(Fast[1])+
       " | EMA"+(string)SlowEMA+" "+Price(Slow[1])+" | RSI("+(string)RSIPeriod+") "+DoubleToString(RSI[1],1)+
       " | Spread "+DoubleToString(spread,1)+" points"+
@@ -513,8 +557,8 @@ string BuildAIPrompt(const LocalSignal &signal) {
 }
 
 // ---- Lot size and partial-close volumes ---------------------------------------
-double VolumeStep() { double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP); return step>0 ? step : 0.01; }
-double VolumeMin() { return SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN); }
+double VolumeStep() { double step=SymbolInfoDouble(Sym,SYMBOL_VOLUME_STEP); return step>0 ? step : 0.01; }
+double VolumeMin() { return SymbolInfoDouble(Sym,SYMBOL_VOLUME_MIN); }
 string Lots(double volume) {
    int digits=(int)MathMax(0,MathCeil(-MathLog10(VolumeStep())-1e-9));
    return DoubleToString(volume,digits);
@@ -526,9 +570,9 @@ bool PlanVolume(int side, double entry, double sl, double &volume, double &riskM
    volume=0; riskMoney=0;
    ENUM_ORDER_TYPE type=side==1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double loss=0;
-   if(!OrderCalcProfit(type,_Symbol,1.0,entry,sl,loss) || loss>=0) { reason="SL riskini hisoblab bo'lmadi"; return false; }
+   if(!OrderCalcProfit(type,Sym,1.0,entry,sl,loss) || loss>=0) { reason="SL riskini hisoblab bo'lmadi"; return false; }
    loss=-loss;
-   double step=VolumeStep(), minLot=VolumeMin(), maxLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step=VolumeStep(), minLot=VolumeMin(), maxLot=SymbolInfoDouble(Sym,SYMBOL_VOLUME_MAX);
    if(minLot<=0 || maxLot<minLot) { reason="Broker lot cheklovlari noto'g'ri"; return false; }
    double funds=MathMin(AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY));
    if(funds<=0) { reason="Hisobda mablag' yo'q"; return false; }
@@ -568,17 +612,46 @@ string SplitText(double volume) {
 
 // What happens at TP1 (part 0) / TP2 (part 1).
 string TPAction(int part) {
-   string move=part==0 ? "SL → Entry (zararsiz)" : "SL → TP1";
+   string move=part==0 ? "SL → Entry+"+DoubleToString(BreakevenLockR,2)+"R (zararsiz, TP1 foydasi saqlanadi)" : "SL → TP1";
    if(!UsePartialTP) return MoveSLAfterTP ? move : "kuzatiladi";
    return DoubleToString(part==0 ? TP1ClosePercent : TP2ClosePercent,0)+"% yopiladi"+(MoveSLAfterTP ? ", "+move : "");
 }
 
 // Exit plan in English for the Claude prompt (overrides the generic plan in the system text).
 string ExitPlanText() {
-   if(!UsePartialTP) return "whole position targets TP3 = "+DoubleToString(TP3_R,2)+"R (risk 1 : reward "+DoubleToString(TP3_R,1)+
-      ")"+(MoveSLAfterTP ? "; stop moves to entry at "+DoubleToString(TP1_R,2)+"R and to TP1 at "+DoubleToString(TP2_R,2)+"R" : "");
+   string trail=MoveSLAfterTP ? "; stop moves to entry+"+DoubleToString(BreakevenLockR,2)+"R at TP1 and to TP1 at TP2" : "";
+   if(!UsePartialTP) return "whole position targets TP3 = "+DoubleToString(TP3_R,2)+"R"+trail;
    return DoubleToString(TP1ClosePercent,0)+"% closed at "+DoubleToString(TP1_R,2)+"R, "+DoubleToString(TP2ClosePercent,0)+
-      "% at "+DoubleToString(TP2_R,2)+"R, rest at "+DoubleToString(TP3_R,2)+"R";
+      "% at "+DoubleToString(TP2_R,2)+"R, rest at "+DoubleToString(TP3_R,2)+"R"+trail;
+}
+
+// Accuracy estimate shown with every signal: TP1 hit rate of the same rules on this symbol/TF,
+// averaged with Claude's confidence when Claude answered. -1 when nothing is known yet.
+int AccuracyPercent(const LocalSignal &signal, int claudeConfidence) {
+   bool history=signal.histRate>=0 && signal.histSamples>0;
+   if(history && claudeConfidence>0) return (int)MathRound((signal.histRate+claudeConfidence)/2.0);
+   if(history) return (int)MathRound(signal.histRate);
+   return claudeConfidence>0 ? claudeConfidence : -1;
+}
+
+string AccuracyText(const LocalSignal &signal, int claudeConfidence) {
+   int accuracy=AccuracyPercent(signal,claudeConfidence);
+   string text="🎯 Aniqlik: "+(accuracy>=0 ? (string)accuracy+"%" : "hali noma'lum");
+   string parts="";
+   if(signal.histRate>=0 && signal.histSamples>0)
+      parts+="tarixda TP1 ga "+DoubleToString(signal.histRate,0)+"% ("+(string)signal.histSamples+" ta)";
+   if(claudeConfidence>0) parts+=(parts=="" ? "" : " • ")+"Claude "+(string)claudeConfidence+"%";
+   parts+=(parts=="" ? "" : " • ")+"strategiya "+(string)signal.families+"/"+(string)AZT_FAMILIES;
+   return text+" ("+parts+")";
+}
+
+string LimitText(const LocalSignal &signal) {
+   if(signal.limit<=0) return "";
+   double risk=MathAbs(signal.limit-signal.sl);
+   return "\n⏳ "+(signal.side==1 ? "BUY LIMIT" : "SELL LIMIT")+" (kutiladigan narx): "+Price(signal.limit)+
+      "\n   🛑 SL "+Price(signal.sl)+" ("+Distance(risk)+")"+
+      "\n   🎯 TP1 "+Price(signal.ltp1)+" | TP2 "+Price(signal.ltp2)+" | 🏁 TP3 "+Price(signal.ltp3)+
+      "\n   ⌛ "+(string)LimitExpiryBars+" sham ichida ochilmasa bekor qilinadi";
 }
 
 string SignalText(const LocalSignal &signal, bool volumeOk, double volume, double riskMoney, string volumeReason) {
@@ -586,26 +659,29 @@ string SignalText(const LocalSignal &signal, bool volumeOk, double volume, doubl
    int pct3=(int)MathRound(100-TP1ClosePercent-TP2ClosePercent);
    string d1, d2;
    string h1=HTFTrendWord(0,AIHigherTF1,d1), h2=HTFTrendWord(1,AIHigherTF2,d2);
-   string text="📊 SIGNAL | "+_Symbol+" "+TFName(TF)+" | "+(signal.side==1 ? "🟢 BUY" : "🔴 SELL")+
-      "\nSetup: "+signal.setup+"\nSham yopildi (broker vaqti): "+TimeToString(signal.time)+
-      (signal.zoneTop>0 ? "\n🧭 Zona: "+Price(signal.zoneBottom)+" – "+Price(signal.zoneTop)+
-                          " (SL zona chegarasidan "+DoubleToString(SLBufferATR,2)+" ATR past)" : "")+
+   string text="📊 SIGNAL | "+Sym+" | "+TFName(TF)+" | "+(signal.side==1 ? "🟢 BUY" : "🔴 SELL")+
+      "\n"+AssetName(AssetClass())+
+      "\n🧩 Setup: "+signal.setup+
+      "\n🕒 Sham yopildi (broker vaqti): "+TimeToString(signal.time)+
+      (signal.zoneTop>0 ? "\n🧭 Zona: "+Price(signal.zoneBottom)+" – "+Price(signal.zoneTop) : "")+
       "\n━━━━━━━━━━━━━━"+
       "\n▶️ Kirish: "+Price(signal.entry)+" (bozor narxida)"+
       "\n🛑 Stop Loss: "+Price(signal.sl)+" ("+Distance(risk)+")"+
       "\n🎯 TP1: "+Price(signal.tp1)+" ("+DoubleToString(TP1_R,2)+"R, +"+Distance(risk*TP1_R)+") → "+TPAction(0)+
       "\n🎯 TP2: "+Price(signal.tp2)+" ("+DoubleToString(TP2_R,2)+"R, +"+Distance(risk*TP2_R)+") → "+TPAction(1)+
-      "\n🏁 TP3 asosiy: "+Price(signal.tp3)+" ("+DoubleToString(TP3_R,2)+"R, +"+Distance(risk*TP3_R)+") → "+
-         (UsePartialTP ? "qolgan "+(string)pct3+"%" : "butun lot")+" (brokerga qo'yiladi)"+
+      "\n🏁 TP3: "+Price(signal.tp3)+" ("+DoubleToString(TP3_R,2)+"R, +"+Distance(risk*TP3_R)+") → "+
+         (UsePartialTP ? "qolgan "+(string)pct3+"%" : "butun lot")+
+      LimitText(signal)+
       "\n━━━━━━━━━━━━━━";
    if(volumeOk) {
       double balance=AccountInfoDouble(ACCOUNT_BALANCE);
       bool split=PartVolume(volume,TP1ClosePercent,volume)>0;
       text+="\n💼 Lot: "+Lots(volume)+" | Risk: -"+Money(riskMoney)+" ("+DoubleToString(100.0*riskMoney/MathMax(balance,0.01),2)+"%)"+
-            "\n💰 Hammasi TP gacha: +"+Money(riskMoney*(split ? PlanFullR() : TP3_R))+
-            "\n"+SplitText(volume);
+            "\n💰 TP1 da: +"+Money(riskMoney*TP1_R*(UsePartialTP && split ? TP1ClosePercent/100.0 : 1.0))+
+            " | hammasi TP gacha: +"+Money(riskMoney*(split ? PlanFullR() : TP3_R))+
+            "\n✂️ "+SplitText(volume);
    } else text+="\n⚠️ Order ochib bo'lmaydi: "+volumeReason;
-   text+="\n🧩 TASDIQLAR (konfluens "+(string)signal.score+"):"+signal.factors;
+   text+="\n\n✅ TASDIQLAR (konfluens "+(string)signal.score+"):"+signal.factors;
    text+="\n📈 Trend: "+StringSubstr(EnumToString(AIHigherTF1),7)+" "+h1+" | "+StringSubstr(EnumToString(AIHigherTF2),7)+" "+h2+
          " | RSI "+DoubleToString(RSI[1],1)+" | struktura "+BiasWord()+
          "\n🕒 Barcha TF: "+MTFMatrix();
@@ -620,32 +696,32 @@ void Notify(const string key, const string text, const string markup="") {
 }
 
 void Panel() {
-   MqlTick tick;
-   string spread="waiting";
-   if(SymbolInfoTick(_Symbol,tick) && tick.ask>0 && tick.bid>0)
-      spread=DoubleToString((tick.ask-tick.bid)/_Point,1)+" points";
    string connection=TerminalInfoInteger(TERMINAL_CONNECTED) ? "connected" : "DISCONNECTED";
    if(MQLInfoInteger(MQL_TESTER)) connection="Strategy Tester";
    SaveTF();
    string frames="";
-   for(int k=0;k<TFCount;k++) frames+="\n  "+TFName(TFList[k])+": "+TFStatus[k];
-   Comment("AI Zone Trader 5 | ",_Symbol," | TF: ",ScanList()," | ",connection,
-      "\nRejim: ",ModeName(),
-      "\nRisk: ",DoubleToString(MaxRiskPercent,1),"% | Chiqish: ",(UsePartialTP ? "qismlab " : "1:"),
-      (UsePartialTP ? ExitPlanText() : DoubleToString(TP3_R,1)+" (butun lot TP3 gacha)"),
+   for(int s=0;s<SymCount;s++) {
+      int ready=0;
+      for(int k=0;k<TFCount;k++) if(TFReady[s*TFCount+k]) ready++;
+      frames+=(s%4==0 ? "\n  " : " | ")+SymList[s]+" "+(string)ready+"/"+(string)TFCount;
+   }
+   Comment("AI Zone Trader 5 | ",(string)SymCount," symbol x ",ScanList()," | ",connection,
+      "\nRejim: ",ModeName()," | Kirish: ",EntryModeName(),
+      "\nRisk: ",DoubleToString(MaxRiskPercent,1),"% | Chiqish: ",ExitPlanText(),
+      "\nPozitsiya ",(string)PositionsTotal(),"/",(string)MaxOpenPositions," | Limit ",(string)CountPendingOrders(),"/",(string)MaxPendingOrders,
       "\nAI: ",AZTAIStatus(),(AITestStatus!="" ? "\nAI test: "+AITestStatus : ""),
-      "\n",(JournalTF>=0 && JournalTF<TFCount ? "["+TFName(TFList[JournalTF])+"] " : ""),JournalScore(AZT_AI_CLAUDE),
       Pending.active ? "\nTELEGRAM TASDIG'I KUTILMOQDA: "+Pending.id : "",
-      "\nTimeframe'lar:",frames,
+      "\nTayyor TF'lar:",frames,
       "\nTekshiruv: ",(RequireAllChecks ? "barcha omillar" : "ball")," + ",(MTFFilter ? "yuqori TF" : "MTF o'chiq"),
-      " + ",(string)MinFamilies,"/11 strategiya oilasi",
+      " + ",(string)MinFamilies,"/11 strategiya oilasi + aniqlik >= ",(string)MinAccuracyPercent,"%",
       " + ",(RequireAIApproval ? "Claude APPROVE >= "+(string)MinAIConfidence+"%" : "AI ixtiyoriy"),
-      "\nSpread: ",spread," | Order limit: ",DoubleToString(MaxSpreadPoints,1),
       "\nLast signal: ",LastSignal,
-      "\nStructure (",TFName(TF),"): ",StructureStatus,
-      "\nHistory (",TFName(TF),"): ",HistoryStatus,
       "\nTelegram: ",AZTTelegramStatus(),
       "\n",TradeStatus);
+}
+
+string EntryModeName() {
+   return EntryMode==AZT_ENTRY_MARKET ? "bozor narxida" : EntryMode==AZT_ENTRY_LIMIT ? "faqat limit" : "bozor + limit";
 }
 
 bool DailyRiskSafe(string &reason) {
@@ -677,6 +753,32 @@ bool DailyRiskSafe(string &reason) {
 
 string PosKey(ulong ticket) { return "AZTP."+PosScope+"."+(string)ticket; }
 
+void PosKeyDelete(const string key) {
+   GlobalVariableDel(key+".r"); GlobalVariableDel(key+".v"); GlobalVariableDel(key+".s");
+   GlobalVariableDel(key+".m"); GlobalVariableDel(key+".e");
+}
+
+// Remember the original risk so TP1/TP2 management survives EA restarts (also for a limit order that fills later).
+void PosKeySet(ulong ticket, double risk, double volume, double riskMoney, datetime expires) {
+   string key=PosKey(ticket);
+   GlobalVariableSet(key+".r",risk);
+   GlobalVariableSet(key+".v",volume);
+   GlobalVariableSet(key+".s",0);
+   GlobalVariableSet(key+".m",riskMoney);
+   if(expires>0) GlobalVariableSet(key+".e",(double)expires);
+   GlobalVariablesFlush();
+}
+
+// This EA's pending limit orders on the account (all symbols).
+int CountPendingOrders() {
+   int count=0;
+   for(int i=OrdersTotal()-1;i>=0;i--) {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket>0 && OrderGetInteger(ORDER_MAGIC)==(long)MagicNumber) count++;
+   }
+   return count;
+}
+
 bool AZTPositionSlotAvailable(int positions,int orders,int limit,bool hedging,bool sameSymbol) {
    return positions+orders<limit && (hedging || !sameSymbol);
 }
@@ -689,28 +791,41 @@ bool AutoOrder(const LocalSignal &signal, string &reason) {
    FileClose(lock);
    return ok;
 }
+
+// Account-level checks, then the market order and/or the limit order (EntryMode).
 bool AutoOrderLocked(const LocalSignal &signal, string &reason) {
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED) ||
       !AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) {
       reason="MT5 da Algo Trading tugmasi yoki EA savdo ruxsati O'CHIQ"; return false;
    }
-   if(!AZTPositionSlotAvailable(PositionsTotal(),OrdersTotal(),MaxOpenPositions,true,false)) {
-      reason="Ochiq pozitsiya/order limiti ("+(string)MaxOpenPositions+")"; return false;
-   }
-   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING && PositionSelect(_Symbol)) {
-      reason="Bu symbol ochiq: alohida parallel pozitsiyalar uchun hedging hisob kerak"; return false;
-   }
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick) || tick.ask<=0 || tick.bid<=0) { reason="Narx yo'q"; return false; }
-   if((tick.ask-tick.bid)/_Point>MaxSpreadPoints) { reason="Spread katta ("+DoubleToString((tick.ask-tick.bid)/_Point,0)+" pt)"; return false; }
+   if(SymbolInfoInteger(Sym,SYMBOL_TRADE_MODE)==SYMBOL_TRADE_MODE_DISABLED) { reason=Sym+" da savdo yopiq"; return false; }
    double balance=AccountInfoDouble(ACCOUNT_BALANCE), equity=AccountInfoDouble(ACCOUNT_EQUITY);
    if(balance<=0 || equity<=0) { reason="Hisobda mablag' yo'q"; return false; }
    if((balance-equity)/balance*100.0>=MaxDrawdownPercent) { reason="Drawdown limiti"; return false; }
    if(!DailyRiskSafe(reason)) return false;
+   string marketReason="", limitReason="";
+   bool market=false, limit=false;
+   if(EntryMode!=AZT_ENTRY_LIMIT) market=MarketOrder(signal,marketReason);
+   if(EntryMode!=AZT_ENTRY_MARKET) limit=LimitOrder(signal,limitReason);
+   reason=(EntryMode!=AZT_ENTRY_LIMIT ? "▶️ Bozor: "+marketReason : "")+(EntryMode==AZT_ENTRY_BOTH ? "\n" : "")+
+          (EntryMode!=AZT_ENTRY_MARKET ? "⏳ Limit: "+limitReason : "");
+   return market || limit;
+}
+
+bool MarketOrder(const LocalSignal &signal, string &reason) {
+   if(!AZTPositionSlotAvailable(PositionsTotal(),0,MaxOpenPositions,true,false)) {
+      reason="Ochiq pozitsiya limiti ("+(string)MaxOpenPositions+")"; return false;
+   }
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING && PositionSelect(Sym)) {
+      reason="Bu symbol ochiq: alohida parallel pozitsiyalar uchun hedging hisob kerak"; return false;
+   }
+   MqlTick tick;
+   if(!SymbolInfoTick(Sym,tick) || tick.ask<=0 || tick.bid<=0) { reason="Narx yo'q"; return false; }
+   if(MaxSpreadPoints>0 && (tick.ask-tick.bid)/SymPoint>MaxSpreadPoints) { reason="Spread katta ("+DoubleToString((tick.ask-tick.bid)/SymPoint,0)+" pt)"; return false; }
    double entry=signal.side==1 ? tick.ask : tick.bid;
    if(MathAbs(entry-signal.entry)>signal.atr*MaxEntryDriftATR) { reason="Narx signaldan juda uzoqlashdi"; return false; }
    double distance=signal.side*(entry-signal.sl);
-   double minStop=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
+   double minStop=SymbolInfoInteger(Sym,SYMBOL_TRADE_STOPS_LEVEL)*SymPoint;
    double marketClose=signal.side==1 ? tick.bid : tick.ask;
    if(distance<=0 || signal.side*(marketClose-signal.sl)<=minStop) { reason="SL broker cheklovini buzadi"; return false; }
    // Broker TP = TP3 from the real entry; TP1/TP2 partial closes are managed by the EA.
@@ -720,25 +835,24 @@ bool AutoOrderLocked(const LocalSignal &signal, string &reason) {
    double volume, riskMoney;
    if(!PlanVolume(signal.side,entry,signal.sl,volume,riskMoney,reason)) return false;
    double margin=0;
-   if(!OrderCalcMargin(type,_Symbol,volume,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)) {
+   if(!OrderCalcMargin(type,Sym,volume,entry,margin) || margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)) {
       reason="Erkin margin yetarli emas"; return false;
    }
-   Trade.SetTypeFillingBySymbol(_Symbol);
+   Trade.SetTypeFillingBySymbol(Sym);
    string comment="AZT-"+(string)(long)signal.time;
-   bool sent=signal.side==1 ? Trade.Buy(volume,_Symbol,entry,signal.sl,tp,comment)
-                           : Trade.Sell(volume,_Symbol,entry,signal.sl,tp,comment);
+   bool sent=signal.side==1 ? Trade.Buy(volume,Sym,entry,signal.sl,tp,comment)
+                           : Trade.Sell(volume,Sym,entry,signal.sl,tp,comment);
    uint code=Trade.ResultRetcode();
    if(!sent || (code!=TRADE_RETCODE_DONE && code!=TRADE_RETCODE_DONE_PARTIAL && code!=TRADE_RETCODE_PLACED)) {
       reason="Broker rad etdi: "+(string)code+" "+Trade.ResultRetcodeDescription(); return false;
    }
-   // Remember the original risk so TP1/TP2 management survives EA restarts.
    double open=entry, filled=volume;
    ulong ticket=0, positionId=0;
    if(Trade.ResultDeal()>0 && HistoryDealSelect(Trade.ResultDeal()))
       positionId=(ulong)HistoryDealGetInteger(Trade.ResultDeal(),DEAL_POSITION_ID);
    for(int i=PositionsTotal()-1;i>=0;i--) {
       ulong t=PositionGetTicket(i);
-      if(t>0 && (t==Trade.ResultOrder() || (positionId>0 && (ulong)PositionGetInteger(POSITION_IDENTIFIER)==positionId)) && PositionGetString(POSITION_SYMBOL)==_Symbol && PositionGetInteger(POSITION_MAGIC)==(long)MagicNumber) {
+      if(t>0 && (t==Trade.ResultOrder() || (positionId>0 && (ulong)PositionGetInteger(POSITION_IDENTIFIER)==positionId)) && PositionGetString(POSITION_SYMBOL)==Sym && PositionGetInteger(POSITION_MAGIC)==(long)MagicNumber) {
          ticket=t; open=PositionGetDouble(POSITION_PRICE_OPEN); filled=PositionGetDouble(POSITION_VOLUME); break;
       }
    }
@@ -749,32 +863,80 @@ bool AutoOrderLocked(const LocalSignal &signal, string &reason) {
       if(Trade.ResultVolume()>0) filled=Trade.ResultVolume();
    }
    double risk=MathAbs(open-signal.sl);
-   if(ticket>0) {
-      GlobalVariableSet(PosKey(ticket)+".r",risk);
-      GlobalVariableSet(PosKey(ticket)+".v",filled);
-      GlobalVariableSet(PosKey(ticket)+".s",0);
-      GlobalVariableSet(PosKey(ticket)+".m",riskMoney);
-      GlobalVariablesFlush();
-   }
+   if(ticket>0) PosKeySet(ticket,risk,filled,riskMoney,0);
    reason="Order ochildi #"+(string)ticket+" | "+(signal.side==1 ? "BUY " : "SELL ")+Lots(filled)+" lot @ "+Price(open)+
       "\nSL "+Price(signal.sl)+" | TP1 "+Price(open+signal.side*risk*TP1_R)+" | TP2 "+Price(open+signal.side*risk*TP2_R)+
       " | TP3 "+Price(tp)+"\nRisk: -"+Money(riskMoney)+"\n"+SplitText(filled);
    return true;
 }
 
-// TP1/TP2 partial closes and stop moves for this EA's positions on this symbol.
-void ManagePositions() {
+// BUY LIMIT / SELL LIMIT at the zone. Cancelled by the EA after LimitExpiryBars candles.
+bool LimitOrder(const LocalSignal &signal, string &reason) {
+   if(signal.limit<=0) { reason="mos zona narxi yo'q"; return false; }
+   if(CountPendingOrders()>=MaxPendingOrders) { reason="Limit orderlar limiti ("+(string)MaxPendingOrders+")"; return false; }
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING && PositionSelect(Sym)) {
+      reason="Bu symbol ochiq: limit uchun hedging hisob kerak"; return false;
+   }
    MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick) || tick.bid<=0) return;
+   if(!SymbolInfoTick(Sym,tick) || tick.ask<=0 || tick.bid<=0) { reason="Narx yo'q"; return false; }
+   double market=signal.side==1 ? tick.ask : tick.bid;
+   double minStop=MathMax(SymbolInfoInteger(Sym,SYMBOL_TRADE_STOPS_LEVEL),SymbolInfoInteger(Sym,SYMBOL_TRADE_FREEZE_LEVEL))*SymPoint;
+   if(signal.side*(market-signal.limit)<=minStop) { reason="Narx limit narxiga juda yaqin yoki o'tib ketgan"; return false; }
+   double risk=signal.side*(signal.limit-signal.sl);
+   if(risk<=minStop || signal.side*(signal.ltp3-signal.limit)<=minStop) { reason="SL/TP broker cheklovini buzadi"; return false; }
+   double volume, riskMoney;
+   if(!PlanVolume(signal.side,signal.limit,signal.sl,volume,riskMoney,reason)) return false;
+   double margin=0;
+   if(!OrderCalcMargin(signal.side==1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,Sym,volume,signal.limit,margin) ||
+      margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)) { reason="Erkin margin yetarli emas"; return false; }
+   Trade.SetTypeFillingBySymbol(Sym);
+   string comment="AZT-L-"+(string)(long)signal.time;
+   bool sent=signal.side==1 ? Trade.BuyLimit(volume,signal.limit,Sym,signal.sl,signal.ltp3,ORDER_TIME_GTC,0,comment)
+                           : Trade.SellLimit(volume,signal.limit,Sym,signal.sl,signal.ltp3,ORDER_TIME_GTC,0,comment);
+   uint code=Trade.ResultRetcode();
+   if(!sent || (code!=TRADE_RETCODE_DONE && code!=TRADE_RETCODE_PLACED)) {
+      reason="Broker rad etdi: "+(string)code+" "+Trade.ResultRetcodeDescription(); return false;
+   }
+   ulong order=Trade.ResultOrder();
+   datetime expires=TimeCurrent()+LimitExpiryBars*PeriodSeconds(TF);
+   if(order>0) PosKeySet(order,risk,volume,riskMoney,expires);
+   reason=(signal.side==1 ? "BUY LIMIT #" : "SELL LIMIT #")+(string)order+" | "+Lots(volume)+" lot @ "+Price(signal.limit)+
+      "\nSL "+Price(signal.sl)+" | TP1 "+Price(signal.ltp1)+" | TP2 "+Price(signal.ltp2)+" | TP3 "+Price(signal.ltp3)+
+      "\nRisk: -"+Money(riskMoney)+" | "+TimeToString(expires)+" gacha kutadi";
+   return true;
+}
+
+// Cancels this EA's limit orders whose time ran out.
+void ManagePendingOrders() {
+   for(int i=OrdersTotal()-1;i>=0;i--) {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0 || OrderGetInteger(ORDER_MAGIC)!=(long)MagicNumber) continue;
+      string key=PosKey(ticket);
+      if(!GlobalVariableCheck(key+".e") || TimeCurrent()<(datetime)GlobalVariableGet(key+".e")) continue;
+      string symbol=OrderGetString(ORDER_SYMBOL);
+      if(Trade.OrderDelete(ticket)) {
+         PosKeyDelete(key);
+         Notify("lx|"+(string)ticket,"⌛ "+symbol+" limit #"+(string)ticket+": narx kelmadi, muddati tugadi va bekor qilindi.");
+      }
+   }
+}
+
+// TP1/TP2 partial closes and stop moves for this EA's positions on every symbol.
+void ManagePositions() {
+   string saved=Sym;
    for(int i=PositionsTotal()-1;i>=0;i--) {
       ulong ticket=PositionGetTicket(i);
-      if(ticket==0 || PositionGetString(POSITION_SYMBOL)!=_Symbol ||
-         PositionGetInteger(POSITION_MAGIC)!=(long)MagicNumber) continue;
+      if(ticket==0 || PositionGetInteger(POSITION_MAGIC)!=(long)MagicNumber) continue;
       string key=PosKey(ticket);
       if(!GlobalVariableCheck(key+".r")) continue;
       int stage=(int)GlobalVariableGet(key+".s");
       double r=GlobalVariableGet(key+".r"), initial=GlobalVariableGet(key+".v");
       if(stage>=2 || r<=0) continue;
+      string symbol=PositionGetString(POSITION_SYMBOL);
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol,tick) || tick.bid<=0) continue;
+      if(symbol!=Sym) AZTSelectSymbol(symbol);
+      if(GlobalVariableCheck(key+".e")) GlobalVariableDel(key+".e"); // the limit order has filled
       int side=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
       double open=PositionGetDouble(POSITION_PRICE_OPEN), volume=PositionGetDouble(POSITION_VOLUME);
       double sl=PositionGetDouble(POSITION_SL), tp=PositionGetDouble(POSITION_TP);
@@ -783,7 +945,7 @@ void ManagePositions() {
       if(side*(price-target)<0) continue;
       GlobalVariableSet(key+".s",stage+1); // once per stage, even if the broker refuses
       GlobalVariablesFlush();
-      string message="🎯 TP"+(string)(stage+1)+" | "+_Symbol+" #"+(string)ticket+" narx "+Price(price);
+      string message="🎯 TP"+(string)(stage+1)+" | "+Sym+" #"+(string)ticket+" narx "+Price(price);
       if(UsePartialTP) {
          double part=PartVolume(initial,stage==0 ? TP1ClosePercent : TP2ClosePercent,volume);
          if(part>0) {
@@ -792,19 +954,21 @@ void ManagePositions() {
          } else message+="\nℹ️ Lot kichik, qism yopilmadi";
       }
       if(MoveSLAfterTP) {
-         double newSL=TickPrice(stage==0 ? open : open+side*r*TP1_R,side);
-         double minStop=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
+         // After TP1 the stop sits slightly beyond entry, so spread/commission never eat the TP1 profit.
+         double newSL=TickPrice(stage==0 ? open+side*r*BreakevenLockR : open+side*r*TP1_R,side);
+         double minStop=SymbolInfoInteger(Sym,SYMBOL_TRADE_STOPS_LEVEL)*SymPoint;
          if(side*(newSL-sl)>0 && side*(price-newSL)>minStop && PositionSelectByTicket(ticket)) {
             if(Trade.PositionModify(ticket,newSL,tp))
-               message+="\n🛡 SL → "+Price(newSL)+(stage==0 ? " (Entry, endi zarar yo'q)" : " (TP1, foyda himoyalandi)");
+               message+="\n🛡 SL → "+Price(newSL)+(stage==0 ? " (zararsiz, TP1 foydasi saqlanadi)" : " (TP1, foyda himoyalandi)");
             else message+="\n⚠️ SL ko'chmadi: "+Trade.ResultRetcodeDescription();
          }
       }
       Notify("mg|"+(string)ticket+"|"+(string)stage,message);
    }
+   if(Sym!=saved) AZTSelectSymbol(saved);
 }
 
-// Reports the real money result once a managed position is fully closed.
+// Reports the real money result once a managed position is fully closed; forgets cancelled limit orders.
 void ReportClosedPositions() {
    string prefix="AZTP."+PosScope+".";
    string names[];
@@ -816,27 +980,35 @@ void ReportClosedPositions() {
    }
    for(int i=0;i<ArraySize(names);i++) {
       ulong ticket=(ulong)StringToInteger(StringSubstr(names[i],StringLen(prefix)));
-      if(ticket==0 || PositionSelectByTicket(ticket)) continue;
+      if(ticket==0 || PositionSelectByTicket(ticket) || OrderSelect(ticket)) continue;
       if(!HistorySelectByPosition(ticket)) continue;
       double net=0;
       bool exited=false;
+      string symbol="";
       for(int d=0;d<HistoryDealsTotal();d++) {
          ulong deal=HistoryDealGetTicket(d);
          net+=HistoryDealGetDouble(deal,DEAL_PROFIT)+HistoryDealGetDouble(deal,DEAL_SWAP)+
               HistoryDealGetDouble(deal,DEAL_COMMISSION)+HistoryDealGetDouble(deal,DEAL_FEE);
          long entry=HistoryDealGetInteger(deal,DEAL_ENTRY);
          if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY || entry==DEAL_ENTRY_INOUT) exited=true;
+         symbol=HistoryDealGetString(deal,DEAL_SYMBOL);
       }
-      // History not synced yet (reconnect, fresh fill): keep the record and check again later.
-      if(!exited) continue;
+      if(!exited) {
+         // A limit order that was cancelled/expired/rejected never becomes a position: forget it.
+         if(HistoryDealsTotal()==0 && HistoryOrderSelect(ticket)) {
+            long state=HistoryOrderGetInteger(ticket,ORDER_STATE);
+            if(state==ORDER_STATE_CANCELED || state==ORDER_STATE_EXPIRED || state==ORDER_STATE_REJECTED) PosKeyDelete(names[i]);
+         }
+         // Otherwise history is not synced yet (reconnect, fresh fill): check again later.
+         continue;
+      }
       double riskMoney=GlobalVariableGet(names[i]+".m");
       int stage=(int)GlobalVariableGet(names[i]+".s");
-      Notify("cl|"+(string)ticket,(net>=0 ? "💰" : "🔻")+" SAVDO YOPILDI | "+_Symbol+" #"+(string)ticket+
+      Notify("cl|"+(string)ticket,(net>=0 ? "💰" : "🔻")+" SAVDO YOPILDI | "+symbol+" #"+(string)ticket+
          "\nNatija: "+(net>=0 ? "+" : "")+Money(net)+(riskMoney>0 ? " ("+DoubleToString(net/riskMoney,2)+"R)" : "")+
          " | olingan TP: "+(string)stage+
          "\nBalans: "+Money(AccountInfoDouble(ACCOUNT_BALANCE)));
-      GlobalVariableDel(names[i]+".r"); GlobalVariableDel(names[i]+".v");
-      GlobalVariableDel(names[i]+".s"); GlobalVariableDel(names[i]+".m");
+      PosKeyDelete(names[i]);
    }
 }
 
@@ -849,52 +1021,61 @@ void ExportSignal(const LocalSignal &signal, string ai, int confidence, bool sen
    if(h==INVALID_HANDLE) { Print("AZT: signal CSV ochilmadi: ",GetLastError()); return; }
    if(FileSize(h)==0) FileWriteString(h,"time,symbol,timeframe,side,setup,entry,sl,tp1,tp2,tp3,zone_low,zone_high,score,atr,ai,ai_conf,sent,mtf\r\n");
    FileSeek(h,0,SEEK_END);
-   FileWriteString(h,TimeToString(signal.time,TIME_DATE|TIME_MINUTES)+","+_Symbol+","+TFName(TF)+","+
+   FileWriteString(h,TimeToString(signal.time,TIME_DATE|TIME_MINUTES)+","+Sym+","+TFName(TF)+","+
       (signal.side==1 ? "BUY" : "SELL")+","+CsvClean(signal.setup)+","+Price(signal.entry)+","+Price(signal.sl)+","+
       Price(signal.tp1)+","+Price(signal.tp2)+","+Price(signal.tp3)+","+Price(signal.zoneBottom)+","+
-      Price(signal.zoneTop)+","+(string)signal.score+","+DoubleToString(signal.atr,_Digits)+","+ai+","+
+      Price(signal.zoneTop)+","+(string)signal.score+","+DoubleToString(signal.atr,SymDigits)+","+ai+","+
       (string)confidence+","+(sent ? "1" : "0")+","+CsvClean(signal.mtf)+"\r\n");
    FileClose(h);
 }
 
+int InitBudget=0; // Slots allowed to load history in the current Scan (first load + replay is slow)
+
 void Scan() {
-   // Highest timeframe first: Claude calls block, so lower timeframes are the ones that may run late.
-   for(int k=TFCount-1;k>=0;k--) { SwitchTF(k); ScanTF(); }
+   InitBudget=4;
+   // Per symbol, highest timeframe first: Claude calls block, so lower timeframes are the ones that may run late.
+   for(int s=0;s<SymCount;s++)
+      for(int k=TFCount-1;k>=0;k--) { SwitchSlot(s*TFCount+k); ScanTF(); }
    Panel();
 }
 
-// One timeframe (already loaded by SwitchTF).
+// One symbol x timeframe slot (already loaded by SwitchSlot).
 void ScanTF() {
    if(!Ready) {
       int count=RequiredBars()+HistoryBars;
-      int available=Bars(_Symbol,TF);
-      if(available<RequiredBars()) {
-         CopyRates(_Symbol,TF,0,RequiredBars(),Rates);
+      int available=Bars(Sym,TF);
+      if(available<IndicatorBars()) {
+         CopyRates(Sym,TF,0,RequiredBars(),Rates);
          Status="Waiting for price history"; return;
       }
       count=MathMin(count,available);
+      if(InitBudget<=0) { Status="Navbatda: tarix yuklanadi"; return; }
+      InitBudget--;
       if(!LoadData(count)) { Status="Waiting for indicator data"; return; }
       RebuildStructure();
       RunHistoricalAnalysis();
+      SlotHistAge[CurSlot]=0;
       ResolveJournal();
       LastClosedBar=Rates[1].time;
       Ready=true;
       Status="Ready: waiting for the next candle close";
-      Print("AZT ready: ",_Symbol," ",EnumToString(TF),"; historical signals=",HistoricalSignals,
+      Print("AZT ready: ",Sym," ",EnumToString(TF),"; historical signals=",HistoricalSignals,
             "; mode=",ModeName(),". Historical signals never trigger orders/alerts.");
       return;
    }
-   datetime closed=iTime(_Symbol,TF,1);
+   datetime closed=iTime(Sym,TF,1);
    if(closed<=0 || closed==LastClosedBar) { return; }
    if(!MQLInfoInteger(MQL_TESTER) && !TerminalInfoInteger(TERMINAL_CONNECTED)) {
       Status="Waiting: broker disconnected"; return;
    }
-   int count=MathMin(Bars(_Symbol,TF),RequiredBars()+HistoryBars);
-   if(count<RequiredBars() || !LoadData(count)) { Status="Waiting for indicator data; will retry"; return; }
+   int count=MathMin(Bars(Sym,TF),RequiredBars()+HistoryBars);
+   if(count<IndicatorBars() || !LoadData(count)) { Status="Waiting for indicator data; will retry"; return; }
    RebuildStructure();
    // Only mark processed after all data is ready; shared OnTick/OnTimer guard.
    LastClosedBar=Rates[1].time;
-   RunHistoricalAnalysis(false);
+   // The rule replay is the slowest step: refresh it every HistoryRefreshBars candles per slot.
+   if(SlotHistAge[CurSlot]>=HistoryRefreshBars) { RunHistoricalAnalysis(false); SlotHistAge[CurSlot]=0; }
+   else SlotHistAge[CurSlot]++;
    ResolveJournal();
    // Higher timeframes get a longer window (a D1/H4 bar's first tick can come minutes after its open).
    int maxDelay=MathMax(MaxSignalDelaySeconds,PeriodSeconds(TF)/12);
@@ -902,13 +1083,20 @@ void ScanTF() {
       Status="Late candle skipped: waiting for a fresh close"; return;
    }
    LocalSignal signal; string reason;
-   if(!EvaluateSignal(1,signal,reason) || !StrictChecks(1,signal,reason)) { Status=reason; Print("AZT ",TFName(TF),": ",Status); return; }
+   if(!EvaluateSignal(1,signal,reason) || !StrictChecks(1,signal,reason)) { Status=reason; Print("AZT ",Sym," ",TFName(TF),": ",Status); return; }
    if(CoolingDown(1)) { Status="Waiting: signal cooldown"; return; }
    // Quant gate: these exact rules lost money on this timeframe's recent history -> no live signal.
    if(MinHistorySamples>0 && HistoryTrades>=MinHistorySamples && HistoryExpectancyR<MinHistoryExpectancyR) {
       Status="Skipped "+signal.setup+": "+TFName(TF)+" tarixida o'rtacha "+DoubleToString(HistoryExpectancyR,2)+"R ("+
              (string)HistoryTrades+" ta) < "+DoubleToString(MinHistoryExpectancyR,2)+"R";
-      Print("AZT ",TFName(TF),": ",Status); return;
+      Print("AZT ",Sym," ",TFName(TF),": ",Status); return;
+   }
+   // Accuracy gate: how often these rules reached TP1 on this symbol/TF before the stop.
+   signal.histSamples=HistoryTrades;
+   signal.histRate=HistoryTrades>0 ? 100.0*HistoryTP1/HistoryTrades : -1;
+   if(MinAccuracyPercent>0 && HistoryTrades>=MinHistorySamples && signal.histRate<MinAccuracyPercent) {
+      Status="Skipped "+signal.setup+": tarixiy aniqlik "+DoubleToString(signal.histRate,0)+"% < "+(string)MinAccuracyPercent+"%";
+      Print("AZT ",Sym," ",TFName(TF),": ",Status); return;
    }
    if(HistoryTrades>0)
       signal.factors+="\n"+(HistoryExpectancyR>0 ? "✅ " : "• ")+"Tarix ("+TFName(TF)+", "+(string)HistoryTrades+" ta): o'rtacha "+
@@ -917,7 +1105,7 @@ void ScanTF() {
    SetupCount++;
    DrawSignal(signal,false);
    Status=(signal.side==1 ? "BUY" : "SELL")+string(" setup: ")+signal.setup;
-   Print("AZT ",_Symbol," ",TFName(TF)," ",Status," | Entry ",Price(signal.entry)," SL ",Price(signal.sl),
+   Print("AZT ",Sym," ",TFName(TF)," ",Status," | Entry ",Price(signal.entry)," SL ",Price(signal.sl),
          " TP1 ",Price(signal.tp1)," TP2 ",Price(signal.tp2)," TP3 ",Price(signal.tp3));
    HandleSignal(signal);
    if(DrawEnabled) ChartRedraw();
@@ -940,8 +1128,8 @@ void ResolveJournal() {
 // AI review first. Only a signal that passed every check AND Claude's review reaches Telegram
 // (RequireAIApproval); then: signal only / trade alone / ask for the Telegram button.
 void HandleSignal(const LocalSignal &signal) {
-   string id=AZTTelegramHash(_Symbol+"|"+EnumToString(TF)+"|"+(string)(long)signal.time+"|"+(string)MagicNumber);
-   string key=_Symbol+"|"+EnumToString(TF)+"|"+(string)(long)signal.time;
+   string id=AZTTelegramHash(Sym+"|"+EnumToString(TF)+"|"+(string)(long)signal.time+"|"+(string)MagicNumber);
+   string key=Sym+"|"+EnumToString(TF)+"|"+(string)(long)signal.time;
    string reason, volumeReason;
    double volume=0, riskMoney=0;
    bool volumeOk=PlanVolume(signal.side,signal.entry,signal.sl,volume,riskMoney,volumeReason);
@@ -995,20 +1183,21 @@ void HandleSignal(const LocalSignal &signal) {
       ExportSignal(signal,aiWord,aiConfidence,false);
       if((action=="AI_ERROR" || action=="NO_AI") && TimeLocal()>=NextAIWarning) {
          NextAIWarning=TimeLocal()+3600;
-         Notify("aiwarn|"+(string)(long)TimeLocal(),"⚠️ "+_Symbol+" "+TFName(TF)+": Claude signalni tekshira olmadi ("+
+         Notify("aiwarn|"+(string)(long)TimeLocal(),"⚠️ "+Sym+" "+TFName(TF)+": Claude signalni tekshira olmadi ("+
             (aiError!="" ? aiError : "API kalit yo'q")+").\nTekshirilmagan signal yuborilmaydi. Chartdagi AI TEST tugmasini bosing.");
       }
       return;
    }
    SentCount++;
    ExportSignal(signal,aiWord,aiConfidence,true);
-   string headline="AZT "+_Symbol+" "+TFName(TF)+" "+(signal.side==1 ? "BUY" : "SELL")+" "+signal.setup+
+   string headline="AZT "+Sym+" "+TFName(TF)+" "+(signal.side==1 ? "BUY" : "SELL")+" "+signal.setup+
       " | Entry "+Price(signal.entry)+" SL "+Price(signal.sl)+" TP3 "+Price(signal.tp3);
    if(PopupAlerts) Alert(headline);
    if(PushNotifications && !SendNotification(headline)) Print("Push notification failed: ",GetLastError());
-   QueueSignalImage(signal,key);
+   string accuracy=AccuracyText(signal,aiConfidence);
+   QueueSignalImage(signal,key,accuracy);
    text=(aiVerified ? "✅ TEKSHIRUVDAN O'TDI: barcha omillar + yuqori TF + Claude "+(string)minConfidence+"%"
-                    : "ℹ️ Qoidalar tekshiruvidan o'tdi, Claude TASDIQLAMAGAN (RequireAIApproval=false)")+"\n"+text;
+                    : "ℹ️ Qoidalar tekshiruvidan o'tdi, Claude TASDIQLAMAGAN (RequireAIApproval=false)")+"\n"+accuracy+"\n\n"+text;
 
    if(TradeMode==AZT_SIGNALS_ONLY) {
       TradeStatus="Faqat signal rejimi";
@@ -1041,13 +1230,13 @@ void HandleSignal(const LocalSignal &signal) {
       return;
    }
    if(Pending.active) {
-      int current=TFIndex;
-      SwitchTF(Pending.tf);
-      JournalSetAction(Pending.id,"SUPERSEDED"); // loads that timeframe's journal
-      SwitchTF(current);
+      int current=CurSlot;
+      SwitchSlot(Pending.tf);
+      JournalSetAction(Pending.id,"SUPERSEDED"); // loads that slot's journal
+      SwitchSlot(current);
       Notify("sup|"+Pending.id,"Avvalgi tasdiq so'rovi yangi signal bilan almashtirildi: "+Pending.id);
    }
-   Pending.active=true; Pending.id=id; Pending.signal=signal; Pending.tf=TFIndex;
+   Pending.active=true; Pending.id=id; Pending.signal=signal; Pending.tf=CurSlot;
    Pending.expires=TimeLocal()+ApprovalTimeoutMinutes*60;
    TradeStatus="Telegram tasdig'i kutilmoqda ("+(string)ApprovalTimeoutMinutes+" daqiqa)";
    JournalAdd(id,signal,context,verdicts,"WAITING");
@@ -1058,7 +1247,7 @@ void HandleSignal(const LocalSignal &signal) {
 // Called from OnTimer: executes or drops the trade once you press a button.
 void ProcessPending() {
    if(!Pending.active) return;
-   SwitchTF(Pending.tf); // journal and messages belong to the signal's timeframe
+   SwitchSlot(Pending.tf); // symbol, journal and messages belong to the signal's slot
    int decision=AZTDecision(Pending.id);
    if(decision==0) { AZTTelegramPollDecisions(); decision=AZTDecision(Pending.id); }
    if(decision==0) {
@@ -1066,22 +1255,22 @@ void ProcessPending() {
       Pending.active=false;
       TradeStatus="Tasdiq muddati tugadi: savdo yo'q";
       JournalSetAction(Pending.id,"EXPIRED");
-      Notify("exp|"+Pending.id,"⌛ "+_Symbol+" "+TFName(TF)+": tasdiq muddati tugadi, savdo ochilmadi.");
+      Notify("exp|"+Pending.id,"⌛ "+Sym+" "+TFName(TF)+": tasdiq muddati tugadi, savdo ochilmadi.");
       return;
    }
    Pending.active=false;
    if(decision<0) {
       TradeStatus="Siz bekor qildingiz";
       JournalSetAction(Pending.id,"USER_REJECT");
-      Notify("res|"+Pending.id,"❌ "+_Symbol+": siz bekor qildingiz, savdo ochilmadi.");
+      Notify("res|"+Pending.id,"❌ "+Sym+": siz bekor qildingiz, savdo ochilmadi.");
       return;
    }
    string reason;
    bool ok=AutoOrder(Pending.signal,reason);
    TradeStatus=(ok ? "Tasdiqlandi: " : "Tasdiqlandi, lekin ochilmadi: ")+reason;
    JournalSetAction(Pending.id,ok ? "APPROVED" : "APPROVED_FAILED");
-   Notify("res|"+Pending.id,(ok ? "✅ "+_Symbol+": tasdiqingiz bilan order ochildi.\n" :
-                                  "⚠️ "+_Symbol+": tasdiqlandi, lekin order ochilmadi.\n")+reason);
+   Notify("res|"+Pending.id,(ok ? "✅ "+Sym+": tasdiqingiz bilan order ochildi.\n" :
+                                  "⚠️ "+Sym+": tasdiqlandi, lekin order ochilmadi.\n")+reason);
 }
 
 // Telegram test: a sample signal from the current price with working buttons.
@@ -1092,9 +1281,11 @@ datetime TestExpires=0, TestSentAt=0;
 void RequestTelegramTest() {
    if(!AZTTelegramReady()) { TradeStatus="Telegram ulanmagan: "+AZTTelegramStatus(); return; }
    if(TimeLocal()-TestSentAt<30) return;
+   SwitchSlot(0); // the chart's own symbol
    MqlTick tick;
-   double atr=ArraySize(ATR)>1 ? ATR[1] : 0;
-   if(!SymbolInfoTick(_Symbol,tick) || tick.ask<=0 || atr<=0) { TradeStatus="Test: narx/ATR hali tayyor emas"; return; }
+   double atrBuffer[1], atr=0;
+   if(CopyBuffer(ATRHandle,0,1,1,atrBuffer)==1) atr=atrBuffer[0];
+   if(!SymbolInfoTick(Sym,tick) || tick.ask<=0 || atr<=0) { TradeStatus="Test: narx/ATR hali tayyor emas"; return; }
    LocalSignal sample; ZeroMemory(sample);
    sample.side=1; sample.time=TimeCurrent(); sample.atr=atr; sample.setup="TEST (namuna)";
    sample.entry=TickPrice(tick.ask); sample.sl=TickPrice(sample.entry-StopATR*atr,-1);
@@ -1104,7 +1295,7 @@ void RequestTelegramTest() {
    sample.factors="\n• Bu namuna: haqiqiy signalda MACD, MA200, FVG, S/R, Fibonacci va patternlar shu yerda bo'ladi";
    double volume=0, riskMoney=0; string reason;
    bool ok=PlanVolume(1,sample.entry,sample.sl,volume,riskMoney,reason);
-   TestId="T"+StringSubstr(AZTTelegramHash(_Symbol+(string)(long)TimeLocal()),0,12);
+   TestId="T"+StringSubstr(AZTTelegramHash(Sym+(string)(long)TimeLocal()),0,12);
    TestExpires=TimeLocal()+15*60; TestSentAt=TimeLocal();
    Notify("test|"+TestId,"🧪 TELEGRAM TEST — savdo OCHILMAYDI\n"+SignalText(sample,ok,volume,riskMoney,reason)+
       "\n\nTugmalarni sinang: bosganingizga EA javob beradi.",AZTApprovalMarkup(TestId));
@@ -1128,7 +1319,7 @@ void RunAITest() {
    AZTAIInit();
    string claude=AZTAIPing(AZT_AI_CLAUDE);
    AITestStatus=claude;
-   Notify("aitest|"+(string)(long)TimeLocal(),"🧪 AI TEST | "+_Symbol+"\n"+claude+
+   Notify("aitest|"+(string)(long)TimeLocal(),"🧪 AI TEST | "+Sym+"\n"+claude+
       "\nBu savdo signali emas.");
 }
 
@@ -1172,36 +1363,67 @@ bool BuildTimeframeList() {
 }
 
 void SaveTF() {
-   if(TFIndex<0) return;
-   TFLastClosed[TFIndex]=LastClosedBar; TFLastSignal[TFIndex]=LastSignalBar; TFReady[TFIndex]=Ready;
-   TFStatus[TFIndex]=Status; TFHistory[TFIndex]=HistoryStatus; TFHistSignals[TFIndex]=HistoricalSignals;
+   if(CurSlot<0) return;
+   TFLastClosed[CurSlot]=LastClosedBar; TFLastSignal[CurSlot]=LastSignalBar; TFReady[CurSlot]=Ready;
+   TFStatus[CurSlot]=Status; TFHistory[CurSlot]=HistoryStatus; TFHistSignals[CurSlot]=HistoricalSignals;
+   SlotHistTrades[CurSlot]=HistoryTrades; SlotHistTP1[CurSlot]=HistoryTP1; SlotHistExp[CurSlot]=HistoryExpectancyR;
 }
 
-// Loads timeframe k into the globals (handles, scan state, journal). Rates[] etc. are reloaded by LoadData.
-void SwitchTF(int k) {
-   if(k<0 || k>=TFCount) return;
-   if(k!=TFIndex) {
-      SaveTF();
-      TFIndex=k; TF=TFList[k];
-      FastHandle=TFFast[k]; SlowHandle=TFSlow[k]; RSIHandle=TFRSI[k]; ATRHandle=TFATR[k];
-      MACDHandle=TFMACD[k]; TrendMAHandle=TFTrendMA[k]; StochHandle=TFStoch[k]; ADXHandle=TFADX[k];
-      LastClosedBar=TFLastClosed[k]; LastSignalBar=TFLastSignal[k]; Ready=TFReady[k];
-      Status=TFStatus[k]; HistoryStatus=TFHistory[k]; HistoricalSignals=TFHistSignals[k];
-      DrawEnabled=TF==(ENUM_TIMEFRAMES)_Period;
-      // Rates[] and indicator arrays still hold the previous timeframe: ScanTF reloads them (LoadData)
-      // before anything reads them. The journal is loaded lazily by EnsureJournal().
-      InvalidateStructureCache();
+// Loads one symbol x timeframe slot into the globals (symbol, handles, scan state, history stats).
+// Rates[] etc. are reloaded by LoadData; the journal is loaded lazily by EnsureJournal().
+void SwitchSlot(int slot) {
+   if(TFCount<=0 || slot<0 || slot>=SymCount*TFCount || slot==CurSlot) return;
+   SaveTF();
+   CurSlot=slot;
+   int s=slot/TFCount, k=slot%TFCount;
+   if(s!=SymIndex || Sym!=SymList[s]) { SymIndex=s; AZTSelectSymbol(SymList[s]); }
+   TFIndex=k; TF=TFList[k];
+   FastHandle=TFFast[slot]; SlowHandle=TFSlow[slot]; RSIHandle=TFRSI[slot]; ATRHandle=TFATR[slot];
+   MACDHandle=TFMACD[slot]; TrendMAHandle=TFTrendMA[slot]; StochHandle=TFStoch[slot]; ADXHandle=TFADX[slot];
+   LastClosedBar=TFLastClosed[slot]; LastSignalBar=TFLastSignal[slot]; Ready=TFReady[slot];
+   Status=TFStatus[slot]; HistoryStatus=TFHistory[slot]; HistoricalSignals=TFHistSignals[slot];
+   HistoryTrades=SlotHistTrades[slot]; HistoryTP1=SlotHistTP1[slot]; HistoryExpectancyR=SlotHistExp[slot];
+   DrawEnabled=Sym==_Symbol && TF==(ENUM_TIMEFRAMES)_Period;
+   InvalidateStructureCache();
+}
+
+// ScanSymbols (or every Market Watch symbol) -> SymList. The chart's own symbol always comes first.
+bool BuildSymbolList() {
+   SymCount=0;
+   string names[];
+   string wanted=ScanSymbols;
+   StringTrimLeft(wanted); StringTrimRight(wanted);
+   int n=0;
+   if(wanted!="") n=StringSplit(wanted,',',names);
+   else {
+      n=SymbolsTotal(true);
+      ArrayResize(names,n);
+      for(int i=0;i<n;i++) names[i]=SymbolName(i,true);
    }
+   int limit=MathMin(MaxSymbols,AZT_MAX_SYMBOLS);
+   for(int i=-1;i<n && SymCount<limit;i++) {
+      string name=i<0 ? _Symbol : names[i];
+      StringTrimLeft(name); StringTrimRight(name);
+      if(name=="") continue;
+      bool seen=false;
+      for(int j=0;j<SymCount;j++) if(SymList[j]==name) seen=true;
+      if(seen) continue;
+      if(!SymbolSelect(name,true)) { Print("AZT: symbol topilmadi: ",name); continue; }
+      SymList[SymCount++]=name;
+   }
+   if(SymCount*TFCount>AZT_MAX_SLOTS) SymCount=AZT_MAX_SLOTS/TFCount;
+   return SymCount>0;
 }
 
-// Lessons from wrong calls: one timeframe per call, at most every 30 seconds.
+// Lessons from wrong calls: one slot per call, at most every 30 seconds.
 void ReflectNext() {
    static int next=-1;
    static datetime nextTry=0;
-   if(Pending.active || TFCount==0 || !InpAILearnFromMistakes || MQLInfoInteger(MQL_TESTER) || TimeLocal()<nextTry) return;
+   int slots=SymCount*TFCount;
+   if(Pending.active || slots==0 || !InpAILearnFromMistakes || MQLInfoInteger(MQL_TESTER) || TimeLocal()<nextTry) return;
    nextTry=TimeLocal()+30;
-   next=(next+1)%TFCount;
-   SwitchTF(next);
+   next=(next+1)%slots;
+   SwitchSlot(next);
    if(Ready) JournalReflectOne();
 }
 
@@ -1210,30 +1432,33 @@ void Heartbeat() {
    if(HeartbeatHours<=0 || MQLInfoInteger(MQL_TESTER) || !AZTTelegramReady() || TimeLocal()<NextHeartbeat) return;
    bool first=NextHeartbeat==0;
    SaveTF();
-   if(first) {
-      // Start message once every timeframe has loaded (or after 2 minutes).
-      bool all=true;
-      for(int k=0;k<TFCount;k++) if(!TFReady[k]) all=false;
-      if(!all && TimeLocal()-StartedAt<120) return;
-   }
+   int slots=SymCount*TFCount, ready=0;
+   for(int i=0;i<slots;i++) if(TFReady[i]) ready++;
+   // Start message once every slot has loaded (or after 3 minutes).
+   if(first && ready<slots && TimeLocal()-StartedAt<180) return;
    NextHeartbeat=TimeLocal()+HeartbeatHours*3600;
    string guard="AZTHB."+PosScope;
    // Re-attaching the EA (inputs changed) must not spam start messages.
    if(first && GlobalVariableCheck(guard) && TimeLocal()-(datetime)GlobalVariableGet(guard)<1800) return;
    GlobalVariableSet(guard,(double)TimeLocal());
    string frames="";
-   for(int k=0;k<TFCount;k++) frames+="\n• "+TFName(TFList[k])+": "+(TFReady[k] ? "✓ " : "⏳ ")+AZTTrimTo(TFStatus[k],70);
-   string text=(first ? "🟢 EA ISHGA TUSHDI" : "🫀 EA ISHLAYAPTI")+" | "+_Symbol+
-      "\nRejim: "+ModeName()+
-      "\nTimeframe'lar:"+frames+
-      "\nHozirgi trend: "+MTFMatrix()+
-      "\nTekshiruv: "+(RequireAllChecks ? "barcha omillar" : "konfluens bali")+(MTFFilter ? " + yuqori TF" : "")+
-      " + kamida "+(string)MinFamilies+"/11 strategiya oilasi"+
+   for(int s=0;s<SymCount;s++) {
+      int symbolReady=0;
+      for(int k=0;k<TFCount;k++) if(TFReady[s*TFCount+k]) symbolReady++;
+      frames+="\n"+(symbolReady==TFCount ? "✅ " : "⏳ ")+SymList[s]+": "+(string)symbolReady+"/"+(string)TFCount+" TF";
+   }
+   string text=(first ? "🟢 EA ISHGA TUSHDI" : "🫀 EA ISHLAYAPTI")+
+      "\n📋 Rejim: "+ModeName()+" | kirish: "+EntryModeName()+
+      "\n🕒 Timeframe'lar: "+ScanList()+
+      "\n💱 Symbollar ("+(string)SymCount+"), tayyor "+(string)ready+"/"+(string)slots+":"+frames+
+      "\n🔍 Tekshiruv: "+(RequireAllChecks ? "barcha omillar" : "konfluens bali")+(MTFFilter ? " + yuqori TF" : "")+
+      " + kamida "+(string)MinFamilies+"/11 strategiya oilasi + aniqlik >= "+(string)MinAccuracyPercent+"%"+
       (RequireAIApproval ? " + Claude APPROVE >= "+(string)MinAIConfidence+"%" : "")+
-      "\nAI: "+AZTAIStatus();
-   if(!first) text+="\nOxirgi "+(string)HeartbeatHours+" soatda: setup "+(string)SetupCount+", yuborilgan signal "+
+      "\n💼 Pozitsiya "+(string)PositionsTotal()+"/"+(string)MaxOpenPositions+" | limit "+(string)CountPendingOrders()+"/"+(string)MaxPendingOrders+
+      "\n🤖 AI: "+AZTAIStatus();
+   if(!first) text+="\n📊 Oxirgi "+(string)HeartbeatHours+" soatda: setup "+(string)SetupCount+", yuborilgan signal "+
       (string)SentCount+", Claude o'tkazmagan "+(string)FilteredCount;
-   text+="\nSinash: chartdagi \"Telegram TEST\" tugmasi namunaviy signal yuboradi, \"AI TEST\" Claude'ni tekshiradi.";
+   text+="\n🧪 Sinash: chartdagi \"Telegram TEST\" tugmasi namunaviy signal yuboradi, \"AI TEST\" Claude'ni tekshiradi.";
    SetupCount=0; SentCount=0; FilteredCount=0;
    Notify("hb|"+PosScope+"|"+(string)(long)TimeLocal(),text);
 }
@@ -1246,6 +1471,26 @@ void Button(string name, int y, string text) {
    ObjectSetInteger(0,name,OBJPROP_XSIZE,165);
    ObjectSetInteger(0,name,OBJPROP_YSIZE,26);
    ObjectSetString(0,name,OBJPROP_TEXT,text);
+}
+
+void ReleaseHandles() {
+   for(int i=0;i<AZT_MAX_SLOTS;i++) {
+      if(TFFast[i]!=INVALID_HANDLE) IndicatorRelease(TFFast[i]);
+      if(TFSlow[i]!=INVALID_HANDLE) IndicatorRelease(TFSlow[i]);
+      if(TFRSI[i]!=INVALID_HANDLE) IndicatorRelease(TFRSI[i]);
+      if(TFATR[i]!=INVALID_HANDLE) IndicatorRelease(TFATR[i]);
+      if(TFMACD[i]!=INVALID_HANDLE) IndicatorRelease(TFMACD[i]);
+      if(TFTrendMA[i]!=INVALID_HANDLE) IndicatorRelease(TFTrendMA[i]);
+      if(TFStoch[i]!=INVALID_HANDLE) IndicatorRelease(TFStoch[i]);
+      if(TFADX[i]!=INVALID_HANDLE) IndicatorRelease(TFADX[i]);
+      TFFast[i]=INVALID_HANDLE; TFSlow[i]=INVALID_HANDLE; TFRSI[i]=INVALID_HANDLE; TFATR[i]=INVALID_HANDLE;
+      TFMACD[i]=INVALID_HANDLE; TFTrendMA[i]=INVALID_HANDLE; TFStoch[i]=INVALID_HANDLE; TFADX[i]=INVALID_HANDLE;
+   }
+   for(int s=0;s<AZT_MAX_SYMBOLS;s++)
+      for(int i=0;i<4;i++) {
+         if(HTFHandles[s][i]!=INVALID_HANDLE) IndicatorRelease(HTFHandles[s][i]);
+         HTFHandles[s][i]=INVALID_HANDLE;
+      }
 }
 
 int OnInit() {
@@ -1264,7 +1509,7 @@ int OnInit() {
       (!EnableCrossSignals && !EnablePullbackSignals && !EnableStructureBreakSignals &&
        !EnableOrderBlockSignals && !EnableTrendlineSignals) || MaxRiskPercent<=0 || MaxRiskPercent>100 ||
       MinLotMaxRiskPercent<MaxRiskPercent || MaxDailyLossPercent<=0 || MaxDrawdownPercent<=0 || MaxConsecutiveLosses<1 ||
-      MaxOpenPositions<1 || MaxSpreadPoints<=0 || MaxEntryDriftATR<=0 || SlippagePoints<0 ||
+      MaxOpenPositions<1 || MaxSpreadPoints<0 || MaxEntryDriftATR<=0 || SlippagePoints<0 ||
       ApprovalTimeoutMinutes<1 || ApprovalTimeoutMinutes>1440 || AICandles<5 || AICandles>200 ||
       MACDFast<2 || MACDSlow<=MACDFast || MACDSignalPeriod<2 || TrendMAPeriod<10 || TrendMAPeriod>1000 ||
       FVGLookback<3 || FVGLookback>500 || FVGMinATR<0 || SNRLookback<20 || SNRLookback>2000 ||
@@ -1275,54 +1520,66 @@ int OnInit() {
       RangeBars<3 || RangeBars>100 || RangeMaxATR<=0 || StochK<2 || StochD<1 || StochSlowing<1 ||
       ADXPeriod<2 || ADXPeriod>200 || MinADX<0 || VolumeAvgBars<3 || VolumeAvgBars>500 || VolumeSpike<=1 ||
       SessionStartGMT<0 || SessionStartGMT>23 || SessionEndGMT<0 || SessionEndGMT>24 || SessionStartGMT==SessionEndGMT ||
-      VolatilityBars<20 || VolatilityBars>1000 || MaxSpreadRiskPercent<=0 || SniperMaxZoneATR<=0 || MinHistorySamples<0) {
+      VolatilityBars<20 || VolatilityBars>1000 || MaxSpreadRiskPercent<=0 || SniperMaxZoneATR<=0 || MinHistorySamples<0 ||
+      MaxPendingOrders<0 || MaxPendingOrders>100 || LimitOffsetATR<0 || LimitExpiryBars<1 || BreakevenLockR<0 ||
+      BreakevenLockR>=TP1_R || MaxSymbols<1 || MinAccuracyPercent<0 || MinAccuracyPercent>100 || HistoryRefreshBars<1) {
       Print("AZT: Invalid input parameters (strategiya oilalari)"); return INIT_PARAMETERS_INCORRECT;
    }
    if(MTFMinAgreePercent<0 || MTFMinAgreePercent>100 || MinAIConfidence<0 || MinAIConfidence>100 ||
       HeartbeatHours<0 || HeartbeatHours>168 || !BuildTimeframeList()) {
       Print("AZT: Invalid input parameters (ScanTimeframes / MTF / AI / Heartbeat)"); return INIT_PARAMETERS_INCORRECT;
    }
+   if(!BuildSymbolList()) { Print("AZT: ScanSymbols da birorta ham symbol topilmadi"); return INIT_PARAMETERS_INCORRECT; }
    Prefix="AZT_LOCAL_"+(string)MagicNumber+"_";
-   PosScope=StringSubstr(AZTTelegramHash(_Symbol+"|"+(string)MagicNumber),0,8);
+   // One EA manages every symbol, so trade records are scoped by magic number only.
+   PosScope=StringSubstr(AZTTelegramHash("ALL|"+(string)MagicNumber),0,8);
    ArraySetAsSeries(Rates,true); ArraySetAsSeries(Fast,true); ArraySetAsSeries(Slow,true);
    ArraySetAsSeries(RSI,true); ArraySetAsSeries(ATR,true);
    ArraySetAsSeries(MACDMain,true); ArraySetAsSeries(MACDSignal,true); ArraySetAsSeries(TrendMA,true);
    ArraySetAsSeries(StochMain,true); ArraySetAsSeries(StochSignal,true);
    ArraySetAsSeries(ADXMain,true); ArraySetAsSeries(ADXPlus,true); ArraySetAsSeries(ADXMinus,true);
-   // A failed init must not leave handles of the previous run for OnDeinit to release.
-   for(int k=0;k<AZT_MAX_TF;k++) {
-      TFFast[k]=INVALID_HANDLE; TFSlow[k]=INVALID_HANDLE; TFRSI[k]=INVALID_HANDLE;
-      TFATR[k]=INVALID_HANDLE; TFMACD[k]=INVALID_HANDLE; TFTrendMA[k]=INVALID_HANDLE;
-      TFStoch[k]=INVALID_HANDLE; TFADX[k]=INVALID_HANDLE;
+   // Every slot starts without handles, so a failed init never releases stale ones.
+   for(int i=0;i<AZT_MAX_SLOTS;i++) {
+      TFFast[i]=INVALID_HANDLE; TFSlow[i]=INVALID_HANDLE; TFRSI[i]=INVALID_HANDLE; TFATR[i]=INVALID_HANDLE;
+      TFMACD[i]=INVALID_HANDLE; TFTrendMA[i]=INVALID_HANDLE; TFStoch[i]=INVALID_HANDLE; TFADX[i]=INVALID_HANDLE;
    }
-   for(int k=0;k<TFCount;k++) {
-      ENUM_TIMEFRAMES tf=TFList[k];
-      TFFast[k]=iMA(_Symbol,tf,FastEMA,0,MODE_EMA,PRICE_CLOSE);
-      TFSlow[k]=iMA(_Symbol,tf,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
-      TFRSI[k]=iRSI(_Symbol,tf,RSIPeriod,PRICE_CLOSE); TFATR[k]=iATR(_Symbol,tf,ATRPeriod);
-      TFMACD[k]=iMACD(_Symbol,tf,MACDFast,MACDSlow,MACDSignalPeriod,PRICE_CLOSE);
-      TFTrendMA[k]=iMA(_Symbol,tf,TrendMAPeriod,0,MODE_SMA,PRICE_CLOSE);
-      TFStoch[k]=iStochastic(_Symbol,tf,StochK,StochD,StochSlowing,MODE_SMA,STO_LOWHIGH);
-      TFADX[k]=iADX(_Symbol,tf,ADXPeriod);
-      TFLastClosed[k]=0; TFLastSignal[k]=0; TFReady[k]=false;
-      TFStatus[k]="Starting"; TFHistory[k]="History analysis pending"; TFHistSignals[k]=0;
-      if(TFFast[k]==INVALID_HANDLE || TFSlow[k]==INVALID_HANDLE || TFRSI[k]==INVALID_HANDLE || TFATR[k]==INVALID_HANDLE ||
-         TFMACD[k]==INVALID_HANDLE || TFTrendMA[k]==INVALID_HANDLE || TFStoch[k]==INVALID_HANDLE || TFADX[k]==INVALID_HANDLE) {
-         Print("AZT: Cannot create indicators for ",TFName(tf),": ",GetLastError()); return INIT_FAILED;
+   for(int sx=0;sx<AZT_MAX_SYMBOLS;sx++) for(int i=0;i<4;i++) HTFHandles[sx][i]=INVALID_HANDLE;
+   for(int sx=0;sx<SymCount;sx++) {
+      string symbol=SymList[sx];
+      for(int k=0;k<TFCount;k++) {
+         int slot=sx*TFCount+k;
+         ENUM_TIMEFRAMES tf=TFList[k];
+         TFFast[slot]=iMA(symbol,tf,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+         TFSlow[slot]=iMA(symbol,tf,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+         TFRSI[slot]=iRSI(symbol,tf,RSIPeriod,PRICE_CLOSE); TFATR[slot]=iATR(symbol,tf,ATRPeriod);
+         TFMACD[slot]=iMACD(symbol,tf,MACDFast,MACDSlow,MACDSignalPeriod,PRICE_CLOSE);
+         TFTrendMA[slot]=iMA(symbol,tf,TrendMAPeriod,0,MODE_SMA,PRICE_CLOSE);
+         TFStoch[slot]=iStochastic(symbol,tf,StochK,StochD,StochSlowing,MODE_SMA,STO_LOWHIGH);
+         TFADX[slot]=iADX(symbol,tf,ADXPeriod);
+         TFLastClosed[slot]=0; TFLastSignal[slot]=0; TFReady[slot]=false;
+         TFStatus[slot]="Starting"; TFHistory[slot]="History analysis pending"; TFHistSignals[slot]=0;
+         SlotHistTrades[slot]=0; SlotHistTP1[slot]=0; SlotHistExp[slot]=0; SlotHistAge[slot]=0;
+         if(TFFast[slot]==INVALID_HANDLE || TFSlow[slot]==INVALID_HANDLE || TFRSI[slot]==INVALID_HANDLE || TFATR[slot]==INVALID_HANDLE ||
+            TFMACD[slot]==INVALID_HANDLE || TFTrendMA[slot]==INVALID_HANDLE || TFStoch[slot]==INVALID_HANDLE || TFADX[slot]==INVALID_HANDLE) {
+            Print("AZT: Cannot create indicators for ",symbol," ",TFName(tf),": ",GetLastError()); return INIT_FAILED;
+         }
+      }
+      if(!MQLInfoInteger(MQL_TESTER)) {
+         ENUM_TIMEFRAMES htf[2]={AIHigherTF1,AIHigherTF2};
+         for(int i=0;i<2;i++) {
+            HTFHandles[sx][i*2]=iMA(symbol,htf[i],FastEMA,0,MODE_EMA,PRICE_CLOSE);
+            HTFHandles[sx][i*2+1]=iMA(symbol,htf[i],SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+         }
       }
    }
-   TFIndex=-1; JournalTF=-1; StartedAt=TimeLocal(); NextHeartbeat=0;
-   SwitchTF(0);
+   Print("AZT: ",SymCount," symbol x ",TFCount," timeframe skanerlanadi: ",ScanList());
+   TFIndex=-1; CurSlot=-1; SymIndex=-1; JournalSlot=-1; StartedAt=TimeLocal(); NextHeartbeat=0;
+   SwitchSlot(0);
    Trade.SetExpertMagicNumber(MagicNumber); Trade.SetDeviationInPoints(SlippagePoints);
    Trade.SetAsyncMode(false);
    AZTTelegramInit();
    AZTAIInit();
    if(!MQLInfoInteger(MQL_TESTER)) {
-      ENUM_TIMEFRAMES htf[2]={AIHigherTF1,AIHigherTF2};
-      for(int i=0;i<2;i++) {
-         HTFHandles[i*2]=iMA(_Symbol,htf[i],FastEMA,0,MODE_EMA,PRICE_CLOSE);
-         HTFHandles[i*2+1]=iMA(_Symbol,htf[i],SlowEMA,0,MODE_EMA,PRICE_CLOSE);
-      }
       Button(Prefix+"TELEGRAM_TEST",25,"Telegram TEST (tugmali)");
       Button(Prefix+"AI_TEST",55,"AI TEST (Claude)");
       if(TradeMode!=AZT_SIGNALS_ONLY && !AZTTelegramReady())
@@ -1336,18 +1593,8 @@ int OnInit() {
 
 void OnDeinit(const int reason) {
    EventKillTimer();
-   for(int k=0;k<TFCount;k++) {
-      if(TFFast[k]!=INVALID_HANDLE) IndicatorRelease(TFFast[k]);
-      if(TFSlow[k]!=INVALID_HANDLE) IndicatorRelease(TFSlow[k]);
-      if(TFRSI[k]!=INVALID_HANDLE) IndicatorRelease(TFRSI[k]);
-      if(TFATR[k]!=INVALID_HANDLE) IndicatorRelease(TFATR[k]);
-      if(TFMACD[k]!=INVALID_HANDLE) IndicatorRelease(TFMACD[k]);
-      if(TFTrendMA[k]!=INVALID_HANDLE) IndicatorRelease(TFTrendMA[k]);
-      if(TFStoch[k]!=INVALID_HANDLE) IndicatorRelease(TFStoch[k]);
-      if(TFADX[k]!=INVALID_HANDLE) IndicatorRelease(TFADX[k]);
-   }
-   TFCount=0;
-   for(int i=0;i<4;i++) if(HTFHandles[i]!=INVALID_HANDLE) { IndicatorRelease(HTFHandles[i]); HTFHandles[i]=INVALID_HANDLE; }
+   ReleaseHandles();
+   TFCount=0; SymCount=0; CurSlot=-1; SymIndex=-1;
    if(Prefix!="") ObjectsDeleteAll(0,Prefix);
    Comment("");
 }
@@ -1357,6 +1604,7 @@ void OnTimer() {
    ProcessPending();
    ProcessTelegramTest();
    ManagePositions();
+   ManagePendingOrders();
    ReportClosedPositions();
    ReflectNext();
    Heartbeat();

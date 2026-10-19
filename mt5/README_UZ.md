@@ -5,6 +5,19 @@ kerak emas. EA o'zi signal topadi, uni barcha qoidalar va yuqori
 timeframe'lar bilan tekshiradi, Claude'ga tekshirtiradi va **faqat hamma
 tekshiruvdan o'tgan** signalni Telegram'ga yuboradi.
 
+## 0b. Versiya 5.20: barcha symbollar, M1–W1, limit orderlar, aniqlik %
+
+| | |
+|---|---|
+| **Bitta chart — barcha symbollar** | EA'ni **bitta** chartga qo'ying: u Market Watch'dagi barcha symbollarni (forex, kripto, indeks, aksiya, obligatsiya, metall/tovar — broker bergan hammasi) o'zi skanerlaydi. `ScanSymbols` bo'sh = Market Watch; yoki `EURUSD,XAUUSD,BTCUSD,US30`. `MaxSymbols` (standart 12) — har symbol × TF alohida indikator yuklaydi, kompyuter kuchiga qarab oshiring. Boshqa chartlardagi eski EA'larni olib tashlang. |
+| **M1 dan W1 gacha** | `ScanTimeframes = M1,M5,M15,M30,H1,H4,D1,W1`: qisqa (skalp) va uzoq muddatli signallar. |
+| **Aniqlik %** | Har signalda `🎯 Aniqlik: 64% (tarixda TP1 ga 58% (40 ta) • Claude 70% • strategiya 6/11)`. Tarixiy qism — xuddi shu qoidalar shu symbol/TF tarixida TP1 ga necha foiz yetgani. `MinAccuracyPercent` (standart 50%) dan past bo'lsa signal yuborilmaydi. |
+| **BUY LIMIT / SELL LIMIT** | `EntryMode = AZT_ENTRY_BOTH`: savdo rejimida bozor narxida order + zonada limit order (kutiladigan narx signalda ko'rsatiladi). `LimitExpiryBars` (12) sham ichida ochilmasa EA uni bekor qiladi. Diqqat: ikkalasi ochilsa, risk ikki baravar (har biri `MaxRiskPercent`). |
+| **10 ta pozitsiya + 10 ta limit** | `MaxOpenPositions=10`, `MaxPendingOrders=10`. |
+| **TP1 foydasi saqlanadi** | Standart `UsePartialTP=true`: TP1 (1.5R) da **50% yopiladi**, SL **Entry + 0.1R** ga ko'chadi (`BreakevenLockR`) — narx qaytsa ham qolgan qism zararsiz yopiladi, TP1 foydasi yo'qolmaydi. TP2 da yana 25%, SL → TP1. Eng yomon holatda TP1 dan keyin ≈ +0.8R. |
+| **Tartibli xabar** | Rasm ostidagi matn har qiymat alohida qatorda, stikerlar bilan (▶️ Entry, 🛑 SL, 🎯 TP1/TP2, 🏁 TP3, ⏳ LIMIT, 🎯 Aniqlik). |
+| **TradingView** | EA TradingView'dan ma'lumot olmaydi: TradingView'da ochiq API yo'q va sahifani avtomatik o'qish ularning qoidalariga zid. Tahlil MT5 ichidagi brokeringiz kotirovkalari bilan qilinadi (tekshirish shu narxlarda bo'ladi). |
+
 ## 0a. Versiya 5.10: 11 strategiya oilasi va 1:3
 
 | | |

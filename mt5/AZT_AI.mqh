@@ -174,7 +174,7 @@ void AZTLessonsAdd(const int provider,const string lesson) {
    for(int i=first;i<count;i++) FileWriteString(file,lines[i]+"\r\n");
    string clean=lesson;
    StringReplace(clean,"\n"," "); StringReplace(clean,"\r"," ");
-   FileWriteString(file,TimeToString(TimeCurrent(),TIME_DATE)+" "+_Symbol+": "+AZTTrimTo(clean,220)+"\r\n");
+   FileWriteString(file,TimeToString(TimeCurrent(),TIME_DATE)+" "+Sym+": "+AZTTrimTo(clean,220)+"\r\n");
    FileClose(file);
 }
 
