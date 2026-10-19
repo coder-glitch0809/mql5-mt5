@@ -173,7 +173,7 @@ string JournalMemory(int provider,int newest=15) {
       if(c==0) continue;
       lines="\n- "+TimeToString(r.time,TIME_DATE|TIME_MINUTES)+" "+(r.side==1 ? "BUY" : "SELL")+" "+r.setup+
             " | "+r.context+" | you said "+(r.dec[provider]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[provider]+
-            "% | result: "+(r.outcome==1 ? "reached 1.5R" : "hit SL first")+" | "+(c>0 ? "RIGHT" : "WRONG")+lines;
+            "% | result: "+(r.outcome==1 ? "reached TP1 ("+DoubleToString(TP1_R,2)+"R)" : "hit SL first")+" | "+(c>0 ? "RIGHT" : "WRONG")+lines;
       shown++;
    }
    string text="\n\nYOUR OWN TRACK RECORD ("+AZTAIName(provider)+") on "+_Symbol+" "+EnumToString(TF)+": "+
@@ -244,7 +244,7 @@ void JournalReflectOne() {
             " setup: "+r.setup+"\nEntry "+DoubleToString(r.entry,_Digits)+" SL "+DoubleToString(r.sl,_Digits)+
             "\nContext at signal: "+r.context+
             "\nYou answered: "+(r.dec[p]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[p]+"% because: "+r.why[p]+
-            "\nWhat really happened: "+(r.outcome==1 ? "price reached 1.5R before the stop" : "the stop was hit before 1.5R")+
+            "\nWhat really happened: "+(r.outcome==1 ? "price reached TP1 ("+DoubleToString(TP1_R,2)+"R) before the stop" : "the stop was hit before TP1")+
             "; best move +"+DoubleToString(r.mfeR,2)+"R, worst -"+DoubleToString(r.maeR,2)+"R.";
          string lesson;
          bool ok=AZTAIReflect(p,facts,lesson);

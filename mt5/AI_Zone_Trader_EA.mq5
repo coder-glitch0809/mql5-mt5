@@ -316,7 +316,13 @@ void MTFCheck(int side, datetime closedAt, string &line, int &vote, string &bloc
       if(trend==side) agree++;
       else if(trend==-side) { against++; opposite+=(opposite=="" ? "" : ", ")+TFName(TFList[k])+" "+word; }
    }
-   if(counted==0) { line="Yuqori TF: "+(line=="" ? "yo'q (eng yuqori timeframe)" : line+" (ma'lumot yo'q)"); return; }
+   if(counted==0) {
+      if(line=="") { line="Yuqori TF: yo'q (eng yuqori timeframe)"; return; }
+      // Higher timeframes exist but none has data yet: the filter cannot confirm, so it blocks.
+      line="Yuqori TF: "+line+" (ma'lumot yo'q)";
+      blocker="yuqori timeframe ma'lumoti hali yuklanmagan";
+      return;
+   }
    int percent=(int)MathRound(100.0*agree/counted);
    line="Yuqori TF: "+line+" ("+(string)agree+"/"+(string)counted+" mos)";
    if(agree==counted) vote=1;
@@ -428,8 +434,8 @@ string BuildAIPrompt(const LocalSignal &signal) {
    double risk=MathAbs(signal.entry-signal.sl);
    string p="Symbol: "+_Symbol+" | Signal timeframe: "+EnumToString(TF)+" | Broker time: "+TimeToString(TimeCurrent())+
       "\nProposed: "+(signal.side==1 ? "BUY" : "SELL")+" | Setup: "+signal.setup+
-      "\nEntry "+Price(signal.entry)+" | SL "+Price(signal.sl)+" | TP1 (1.5R) "+Price(signal.tp1)+
-      " | TP2 (2.25R) "+Price(signal.tp2)+" | TP3 (3R) "+Price(signal.tp3)+
+      "\nEntry "+Price(signal.entry)+" | SL "+Price(signal.sl)+" | TP1 ("+DoubleToString(TP1_R,2)+"R) "+Price(signal.tp1)+
+      " | TP2 ("+DoubleToString(TP2_R,2)+"R) "+Price(signal.tp2)+" | TP3 ("+DoubleToString(TP3_R,2)+"R) "+Price(signal.tp3)+
       " | Risk "+DoubleToString(risk/_Point,0)+" points = "+DoubleToString(risk/MathMax(signal.atr,_Point),2)+" ATR"+
       "\nLast closed candle: ATR("+(string)ATRPeriod+") "+Price(ATR[1])+" | EMA"+(string)FastEMA+" "+Price(Fast[1])+
       " | EMA"+(string)SlowEMA+" "+Price(Slow[1])+" | RSI("+(string)RSIPeriod+") "+DoubleToString(RSI[1],1)+
@@ -669,6 +675,12 @@ bool AutoOrderLocked(const LocalSignal &signal, string &reason) {
          ticket=t; open=PositionGetDouble(POSITION_PRICE_OPEN); filled=PositionGetDouble(POSITION_VOLUME); break;
       }
    }
+   if(ticket==0) {
+      // Position list not synced yet: fall back to the trade result so TP1/TP2 management still runs.
+      ticket=positionId>0 ? positionId : Trade.ResultOrder();
+      if(Trade.ResultPrice()>0) open=Trade.ResultPrice();
+      if(Trade.ResultVolume()>0) filled=Trade.ResultVolume();
+   }
    double risk=MathAbs(open-signal.sl);
    if(ticket>0) {
       GlobalVariableSet(PosKey(ticket)+".r",risk);
@@ -738,11 +750,16 @@ void ReportClosedPositions() {
       if(ticket==0 || PositionSelectByTicket(ticket)) continue;
       if(!HistorySelectByPosition(ticket)) continue;
       double net=0;
+      bool exited=false;
       for(int d=0;d<HistoryDealsTotal();d++) {
          ulong deal=HistoryDealGetTicket(d);
          net+=HistoryDealGetDouble(deal,DEAL_PROFIT)+HistoryDealGetDouble(deal,DEAL_SWAP)+
               HistoryDealGetDouble(deal,DEAL_COMMISSION)+HistoryDealGetDouble(deal,DEAL_FEE);
+         long entry=HistoryDealGetInteger(deal,DEAL_ENTRY);
+         if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY || entry==DEAL_ENTRY_INOUT) exited=true;
       }
+      // History not synced yet (reconnect, fresh fill): keep the record and check again later.
+      if(!exited) continue;
       double riskMoney=GlobalVariableGet(names[i]+".m");
       int stage=(int)GlobalVariableGet(names[i]+".s");
       Notify("cl|"+(string)ticket,(net>=0 ? "💰" : "🔻")+" SAVDO YOPILDI | "+_Symbol+" #"+(string)ticket+
@@ -759,7 +776,7 @@ void ReportClosedPositions() {
 string CsvClean(string value) { StringReplace(value,","," "); StringReplace(value,"\n"," "); StringReplace(value,"\r"," "); return value; }
 
 void ExportSignal(const LocalSignal &signal, string ai, int confidence, bool sent) {
-   int h=FileOpen("AZT_signals_v5.csv",FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   int h=FileOpen("AZT_signals_v5.csv",FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ,'\t',CP_UTF8);
    if(h==INVALID_HANDLE) { Print("AZT: signal CSV ochilmadi: ",GetLastError()); return; }
    if(FileSize(h)==0) FileWriteString(h,"time,symbol,timeframe,side,setup,entry,sl,tp1,tp2,tp3,zone_low,zone_high,score,atr,ai,ai_conf,sent,mtf\r\n");
    FileSeek(h,0,SEEK_END);
@@ -772,7 +789,8 @@ void ExportSignal(const LocalSignal &signal, string ai, int confidence, bool sen
 }
 
 void Scan() {
-   for(int k=0;k<TFCount;k++) { SwitchTF(k); ScanTF(); }
+   // Highest timeframe first: Claude calls block, so lower timeframes are the ones that may run late.
+   for(int k=TFCount-1;k>=0;k--) { SwitchTF(k); ScanTF(); }
    Panel();
 }
 
@@ -1183,6 +1201,11 @@ int OnInit() {
    ArraySetAsSeries(Rates,true); ArraySetAsSeries(Fast,true); ArraySetAsSeries(Slow,true);
    ArraySetAsSeries(RSI,true); ArraySetAsSeries(ATR,true);
    ArraySetAsSeries(MACDMain,true); ArraySetAsSeries(MACDSignal,true); ArraySetAsSeries(TrendMA,true);
+   // A failed init must not leave handles of the previous run for OnDeinit to release.
+   for(int k=0;k<AZT_MAX_TF;k++) {
+      TFFast[k]=INVALID_HANDLE; TFSlow[k]=INVALID_HANDLE; TFRSI[k]=INVALID_HANDLE;
+      TFATR[k]=INVALID_HANDLE; TFMACD[k]=INVALID_HANDLE; TFTrendMA[k]=INVALID_HANDLE;
+   }
    for(int k=0;k<TFCount;k++) {
       ENUM_TIMEFRAMES tf=TFList[k];
       TFFast[k]=iMA(_Symbol,tf,FastEMA,0,MODE_EMA,PRICE_CLOSE);

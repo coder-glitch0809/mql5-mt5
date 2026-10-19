@@ -17,6 +17,16 @@ chart image only for verified signals; heartbeat/start messages; AI-failure warn
 `AZT_SIGNALS_ONLY`; `AZT_signals_v5.csv` export with the AI verdict; Install-MT5.ps1 compiles instead
 of shipping a prebuilt .ex5.
 
+Fixes after 5.00 review (not compiled yet either; compile and run the tests as above):
+- MTF filter: when higher timeframes exist but none has data yet, the signal is blocked instead of passing unchecked
+  (new check in `test_mt5_signals`).
+- Timeframes are scanned highest first, so slow Claude calls cannot make H4/D1 signals "late".
+- Telegram queue holds 30 items (was 8): several timeframes closing together no longer drop signals.
+- Auto orders: if the new position is not yet visible, the trade result is used so TP1/TP2 management still runs.
+- Closed-trade report waits for the exit deal in history (no false "SAVDO YOPILDI" after a reconnect).
+- `AZT_signals_v5.csv` is written as UTF-8; Claude prompt, journal memory and lessons use the configured TP R values.
+- Failed OnInit no longer leaves stale indicator handles for OnDeinit.
+
 ---
 
 Current revision: Claude-only. Earlier runtime results below predate this change.

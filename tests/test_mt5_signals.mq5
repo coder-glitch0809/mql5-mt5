@@ -99,6 +99,12 @@ void OnStart() {
    Check(EvaluateSignal(1,signal,reason) && signal.against==0 && StrictChecks(1,signal,reason),"clean signal passes strict checks");
    signal.against=1;
    Check(!StrictChecks(1,signal,reason) && StringFind(reason,"qarshi")>=0,"opposing factor blocks signal (RequireAllChecks)");
+   // A higher timeframe without data must block, not silently pass the MTF filter.
+   Fixture();
+   TFCount=1; TFList[0]=PERIOD_MN1; TFFast[0]=INVALID_HANDLE; TFSlow[0]=INVALID_HANDLE;
+   Check(EvaluateSignal(1,signal,reason) && !StrictChecks(1,signal,reason) && StringFind(reason,"ma'lumot")>=0,
+      "missing higher-timeframe data blocks signal (MTFFilter)");
+   TFCount=0;
    string result="AZT_TEST_RESULT passed="+(string)Passed+" failed="+(string)Failed;
    Print(result);
    int file=FileOpen("azt_test_result.txt",FILE_WRITE|FILE_TXT);
