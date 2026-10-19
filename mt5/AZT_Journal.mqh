@@ -176,8 +176,19 @@ string JournalMemory(int provider,int newest=15) {
             "% | result: "+(r.outcome==1 ? "reached TP1 ("+DoubleToString(TP1_R,2)+"R)" : "hit SL first")+" | "+(c>0 ? "RIGHT" : "WRONG")+lines;
       shown++;
    }
+   // Signals sent while Claude was unavailable: their results are Claude's experience too.
+   string rules="";
+   int rulesShown=0;
+   for(int i=ArraySize(Journal)-1;i>=0 && rulesShown<10;i--) {
+      if(Journal[i].dec[provider]!=0 || (Journal[i].outcome!=1 && Journal[i].outcome!=-1)) continue;
+      AZTJournalRow r=Journal[i];
+      rules="\n- "+TimeToString(r.time,TIME_DATE|TIME_MINUTES)+" "+(r.side==1 ? "BUY" : "SELL")+" "+r.setup+" | "+r.context+
+            " | result: "+(r.outcome==1 ? "reached TP1" : "hit SL first")+rules;
+      rulesShown++;
+   }
    string text="\n\nYOUR OWN TRACK RECORD ("+AZTAIName(provider)+") on "+Sym+" "+EnumToString(TF)+": "+
                JournalScore(provider)+(lines=="" ? "" : lines);
+   if(rules!="") text+="\n\nSIGNALS THE EA SENT WITHOUT YOUR REVIEW (you were unavailable) AND THEIR RESULTS:"+rules;
    string lessons=AZTLessonsText(provider);
    if(lessons!="") text+="\n\nLESSONS YOU WROTE AFTER YOUR PAST MISTAKES (apply them):"+lessons;
    return text;
@@ -232,28 +243,37 @@ string JournalResultText(int i) {
    return text;
 }
 
-// One lesson per call (rate-limited): the wrong AI explains its own mistake.
+// One lesson per call (rate-limited): the wrong AI explains its own mistake, and losing signals
+// the EA sent while Claude was unavailable become lessons once Claude answers again (30-day backlog).
 void JournalReflectOne() {
    if(!InpAILearnFromMistakes || AZTAITester() || TimeLocal()<JournalNextReflect) return;
    EnsureJournal();
    for(int i=ArraySize(Journal)-1;i>=0;i--) {
       if(Journal[i].outcome!=1 && Journal[i].outcome!=-1) continue;
-      if(TimeCurrent()-Journal[i].time>7*86400) break; // old backlog is skipped
+      if(TimeCurrent()-Journal[i].time>30*86400) break; // older backlog is skipped
       for(int p=0;p<AZT_AI_COUNT;p++) {
-         if((Journal[i].reflected & (1<<p))!=0 || JournalCorrect(Journal[i],p)>=0 || !AZTAIHasKey(p)) continue;
+         if((Journal[i].reflected & (1<<p))!=0 || !AZTAIHasKey(p)) continue;
+         bool rulesLoss=Journal[i].dec[p]==0 && Journal[i].outcome==-1;
+         if(JournalCorrect(Journal[i],p)>=0 && !rulesLoss) continue;
          JournalNextReflect=TimeLocal()+60;
          AZTJournalRow r=Journal[i];
          string facts=Sym+" "+EnumToString(TF)+" "+TimeToString(r.time)+" "+(r.side==1 ? "BUY" : "SELL")+
             " setup: "+r.setup+"\nEntry "+DoubleToString(r.entry,SymDigits)+" SL "+DoubleToString(r.sl,SymDigits)+
             "\nContext at signal: "+r.context+
-            "\nYou answered: "+(r.dec[p]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[p]+"% because: "+r.why[p]+
+            (rulesLoss ? "\nYou did not review it (API unavailable); the EA sent it on rule checks alone."
+                       : "\nYou answered: "+(r.dec[p]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[p]+"% because: "+r.why[p])+
             "\nWhat really happened: "+(r.outcome==1 ? "price reached TP1 ("+DoubleToString(TP1_R,2)+"R) before the stop" : "the stop was hit before TP1")+
             "; best move +"+DoubleToString(r.mfeR,2)+"R, worst -"+DoubleToString(r.maeR,2)+"R.";
          string lesson;
-         bool ok=AZTAIReflect(p,facts,lesson);
-         Journal[i].reflected|=(1<<p); // one attempt only: never loop on a failing API
+         if(!AZTAIReflect(p,facts,lesson,rulesLoss)) {
+            // API still down (no credit, network): keep the row and try again in 30 minutes.
+            JournalNextReflect=TimeLocal()+1800;
+            Print("AZT: ",AZTAIName(p)," could not write a lesson yet; retry in 30 min");
+            return;
+         }
+         Journal[i].reflected|=(1<<p);
          JournalSave();
-         Print("AZT: ",AZTAIName(p),ok ? " lesson: "+lesson : " could not write a lesson");
+         Print("AZT: ",AZTAIName(p)," lesson: ",lesson);
          return;
       }
    }

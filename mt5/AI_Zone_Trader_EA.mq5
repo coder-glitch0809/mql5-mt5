@@ -108,6 +108,7 @@ input bool MTFFilter = true;             // Yuqori TF trendi signalga qarshi bo'
 input int MTFMinAgreePercent = 67;       // Yuqori TF'larning kamida shuncha %i signal yo'nalishida bo'lsin
 input bool RequireAllChecks = true;      // Konfluensda bitta ham qarshi (⚠️) omil bo'lmasin
 input bool RequireAIApproval = true;     // Faqat Claude APPROVE bergan signal Telegram'ga yuboriladi
+input bool SendWhenAIUnavailable = true; // Claude javob bermasa (kredit tugagan, internet): 11 strategiya tekshiruvi bilan yuboriladi
 input int MinAIConfidence = 70;          // Claude ishonchi shundan past bo'lsa signal yuborilmaydi
 input int HeartbeatHours = 6;            // Telegram'ga "EA ishlayapti" hisoboti har N soatda (0 = o'chiq)
 
@@ -1168,12 +1169,23 @@ void HandleSignal(const LocalSignal &signal) {
    bool aiVerified=InpAIEnabled && providers>0 && approvals==providers && minConfidence>=MinAIConfidence;
    string aiWord=approvals>0 ? "APPROVE" : rejections>0 ? "REJECT" : "NONE";
    int aiConfidence=verdicts[AZT_AI_CLAUDE].ok ? verdicts[AZT_AI_CLAUDE].confidence : 0;
-   string context=SignalContext();
+   // Claude also learns later from signals it never saw, so the journal keeps what the rules saw.
+   string context=SignalContext()+", families "+(string)signal.families+"/11, score "+(string)signal.score;
+   // No verdict at all (no key, no credit, network): not the same as Claude rejecting the signal.
+   bool aiUnavailable=!InpAIEnabled || providers==0 || (approvals==0 && rejections==0);
    Status=(signal.side==1 ? "BUY" : "SELL")+string(" setup: ")+signal.setup+
           " | Claude "+aiWord+(aiConfidence>0 ? " "+(string)aiConfidence+"%" : "");
 
-   // Gate: an unverified signal is journaled (Claude still learns from its outcome) but never sent.
-   if(RequireAIApproval && !aiVerified) {
+   if(RequireAIApproval && aiUnavailable && TimeLocal()>=NextAIWarning) {
+      NextAIWarning=TimeLocal()+3600;
+      Notify("aiwarn|"+(string)(long)TimeLocal(),"⚠️ Claude signalni tekshira olmadi ("+(aiError!="" ? aiError : "API kalit yo'q")+")."+
+         (SendWhenAIUnavailable ? "\n📨 Signallar hozircha faqat 11 strategiya tekshiruvi bilan yuboriladi."+
+                                  "\n🧠 Hisob to'ldirilgach Claude ularning natijalaridan saboq oladi."
+                                : "\nTekshirilmagan signal yuborilmaydi.")+
+         "\nChartdagi AI TEST tugmasi bilan tekshiring.");
+   }
+   // Gate: a signal Claude rejected or doubted is journaled (Claude still learns from its outcome) but never sent.
+   if(RequireAIApproval && !aiVerified && !(SendWhenAIUnavailable && aiUnavailable)) {
       string action=!InpAIEnabled || providers==0 ? "NO_AI" : aiRejects ? "AI_REJECT" :
                     approvals>0 ? "AI_LOW_CONF" : "AI_ERROR";
       FilteredCount++;
@@ -1181,11 +1193,6 @@ void HandleSignal(const LocalSignal &signal) {
                   (string)MinAIConfidence+"%" : action=="AI_REJECT" ? "Claude rad etdi" : "Claude tekshira olmadi");
       JournalAdd(id,signal,context,verdicts,action);
       ExportSignal(signal,aiWord,aiConfidence,false);
-      if((action=="AI_ERROR" || action=="NO_AI") && TimeLocal()>=NextAIWarning) {
-         NextAIWarning=TimeLocal()+3600;
-         Notify("aiwarn|"+(string)(long)TimeLocal(),"⚠️ "+Sym+" "+TFName(TF)+": Claude signalni tekshira olmadi ("+
-            (aiError!="" ? aiError : "API kalit yo'q")+").\nTekshirilmagan signal yuborilmaydi. Chartdagi AI TEST tugmasini bosing.");
-      }
       return;
    }
    SentCount++;
@@ -1197,11 +1204,12 @@ void HandleSignal(const LocalSignal &signal) {
    string accuracy=AccuracyText(signal,aiConfidence);
    QueueSignalImage(signal,key,accuracy);
    text=(aiVerified ? "✅ TEKSHIRUVDAN O'TDI: barcha omillar + yuqori TF + Claude "+(string)minConfidence+"%"
-                    : "ℹ️ Qoidalar tekshiruvidan o'tdi, Claude TASDIQLAMAGAN (RequireAIApproval=false)")+"\n"+accuracy+"\n\n"+text;
+       : aiUnavailable ? "⚠️ Claude hozir ishlamayapti: signal 11 strategiya + yuqori TF + tarixiy aniqlik bilan tekshirildi"
+                       : "ℹ️ Qoidalar tekshiruvidan o'tdi, Claude TASDIQLAMAGAN (RequireAIApproval=false)")+"\n"+accuracy+"\n\n"+text;
 
    if(TradeMode==AZT_SIGNALS_ONLY) {
       TradeStatus="Faqat signal rejimi";
-      JournalAdd(id,signal,context,verdicts,"SIGNAL_ONLY");
+      JournalAdd(id,signal,context,verdicts,aiUnavailable ? "RULES_ONLY" : "SIGNAL_ONLY");
       Notify(key,text+"\n\nℹ️ Faqat signal rejimi: savdo ochilmaydi. Natija keyinroq 📘 xabarda keladi.");
       return;
    }

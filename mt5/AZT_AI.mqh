@@ -49,6 +49,13 @@ const string AZT_AI_REFLECT=
    "trend, distance to an opposing level, RSI extremes, setup type or session). No generic advice. "
    "Answer with ONLY this JSON: {\"lesson\":\"max 200 chars, Uzbek (Latin script)\"}";
 
+const string AZT_AI_REFLECT_RULES=
+   "While you were unavailable, the EA sent a trading signal using only its rule checks (11 strategy families, "
+   "higher-timeframe trend, historical accuracy). It hit the stop-loss. From the facts given, write ONE short, "
+   "concrete, reusable rule that you will apply when you review such signals, so this loss is rejected next time "
+   "(for example about higher-timeframe trend, distance to an opposing level, RSI extremes, setup type, session "
+   "or volatility). No generic advice. Answer with ONLY this JSON: {\"lesson\":\"max 200 chars, Uzbek (Latin script)\"}";
+
 string AZTAIName(const int provider) { return "Claude"; }
 
 bool AZTAITester() { return MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION); }
@@ -187,10 +194,11 @@ string AZTLessonsText(const int provider,const int newest=12) {
 }
 
 // Asks the provider to write itself a lesson about a wrong call; stores it.
-bool AZTAIReflect(const int provider,const string facts,string &lesson) {
+// rulesOnly: a signal the EA sent without Claude's review (API unavailable) that lost.
+bool AZTAIReflect(const int provider,const string facts,string &lesson,const bool rulesOnly=false) {
    lesson="";
    string text, error;
-   if(!AZTAIAsk(provider,AZT_AI_REFLECT,facts,300,text,error)) return false;
+   if(!AZTAIAsk(provider,rulesOnly ? AZT_AI_REFLECT_RULES : AZT_AI_REFLECT,facts,300,text,error)) return false;
    lesson=AZTJsonString(text,"lesson");
    if(lesson=="") return false;
    AZTLessonsAdd(provider,lesson);

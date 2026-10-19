@@ -41,7 +41,7 @@ TP3 ga yetishi kerak. Avval demo hisobda kamida 2–4 hafta sinang.
 | **Claude tekshiruvi majburiy** | Signal Telegram'ga faqat Claude `APPROVE` va ishonch ≥ 70% bo'lsa boradi (`RequireAIApproval`, `MinAIConfidence`). Rad etilganlari yuborilmaydi, lekin natijasi kuzatilib, Claude xotirasiga yoziladi. Rasm ham faqat tasdiqlangan signalga. |
 | **Standart rejim** | `AZT_SIGNALS_ONLY`: faqat signal, savdo ochilmaydi. Savdo kerak bo'lsa `TradeMode` ni o'zgartiring (4-bo'lim). |
 | **"EA ishlayapti" xabari** | Ishga tushganda va har 6 soatda (`HeartbeatHours`) Telegram'ga holat: har bir TF tayyormi, hozirgi trendlar, nechta setup topildi / yuborildi / Claude o'tkazmadi. |
-| **Claude ishlamasa** | Telegram'ga soatiga bir marta ogohlantirish keladi; tekshirilmagan signal yuborilmaydi. |
+| **Claude ishlamasa** | (Kredit tugagan, internet yo'q.) `SendWhenAIUnavailable=true` (standart): signallar **11 strategiya + yuqori TF + tarixiy aniqlik** tekshiruvi bilan yuborilaveradi, xabarda "⚠️ Claude hozir ishlamayapti" deb yoziladi. Soatiga bir marta ogohlantirish keladi. Hisob to'ldirilgach Claude shu signallarning natijalarini xotirasida ko'radi va SL ga urilganlaridan (oxirgi 30 kun) o'ziga saboq yozadi — keyingi signallarni shu tajriba bilan tekshiradi. Claude **rad etgan** signal baribir yuborilmaydi. |
 | **Ali bilan ulanish** | Har bir signal `MQL5\Files\AZT_signals_v5.csv` ga yoziladi (Claude qarori bilan). Ali'ning Treyder agenti uni o'qiydi. |
 
 **Muhim:** EA'ni har bir symbol uchun **bitta** chartga qo'ying (EURUSD, XAUUSD...). Bir symbolni bir nechta
