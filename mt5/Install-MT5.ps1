@@ -27,7 +27,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $resolved 'MQL5') -PathType Containe
 }
 # Sources only: the .ex5 is always rebuilt from them (step 2b), so it can never be stale.
 $artifacts = @('AI_Zone_Trader_EA.mq5','AZT_Structure.mqh','AZT_History.mqh',
-               'AZT_Telegram.mqh','AZT_Json.mqh','AZT_AI.mqh','AZT_Journal.mqh','AZT_Confluence.mqh','AZT_SignalImage.mqh')
+               'AZT_Telegram.mqh','AZT_Json.mqh','AZT_AI.mqh','AZT_Journal.mqh','AZT_Confluence.mqh','AZT_Strategies.mqh','AZT_SignalImage.mqh')
 foreach ($file in $artifacts) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw "Missing file: $file" }
 }
@@ -40,7 +40,7 @@ New-Item -ItemType Directory -Path $backup | Out-Null
 
 # 1. Remove old copies so Navigator shows exactly one AI_Zone_Trader_EA.
 $old = @('AI_Zone_Trader_EA.ex5','AI_Zone_Trader_EA.mq5','AI_Zone_Trader_Server_EA.ex5','AI_Zone_Trader_Server_EA.mq5',
-         'AZT_Structure.mqh','AZT_History.mqh','AZT_Telegram.mqh','AZT_Json.mqh','AZT_AI.mqh','AZT_Journal.mqh','AZT_Confluence.mqh','AZT_SignalImage.mqh')
+         'AZT_Structure.mqh','AZT_History.mqh','AZT_Telegram.mqh','AZT_Json.mqh','AZT_AI.mqh','AZT_Journal.mqh','AZT_Confluence.mqh','AZT_Strategies.mqh','AZT_SignalImage.mqh')
 foreach ($file in $old) {
     $path = Join-Path $expertsRoot $file
     if (Test-Path -LiteralPath $path) { Move-Item -LiteralPath $path -Destination (Join-Path $backup $file) -Force }

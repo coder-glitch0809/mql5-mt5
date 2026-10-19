@@ -1,6 +1,7 @@
 # AI Zone Trader 5 (MT5)
 
-A MetaTrader 5 Expert Advisor. One chart scans M5, M15, M30, H1, H4 and D1. It finds rule-based
+A MetaTrader 5 Expert Advisor. One chart scans every Market Watch symbol (forex, crypto, indices, stocks,
+bonds, commodities: whatever the broker offers) on M1, M5, M15, M30, H1, H4, D1 and W1. It finds rule-based
 setups (EMA/RSI/ATR, order blocks, BOS/CHOCH, trendlines), requires every confluence check and the
 higher timeframes to agree, and sends a signal to Telegram only after Claude approves it.
 Optional ✅/❌ approval buttons and auto-trading modes. Each trade has a stop-loss and a 3-part take profit: 50% at

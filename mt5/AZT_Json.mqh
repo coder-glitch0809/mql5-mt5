@@ -3,6 +3,19 @@
 // Minimal JSON helpers for Telegram / Claude responses.
 // Not a general parser: finds "key": value pairs, decoding string escapes.
 
+// Symbol being analysed right now. One EA scans every Market Watch symbol, so code uses
+// these instead of _Symbol/_Point/_Digits; AZTSelectSymbol switches them.
+string Sym="";
+double SymPoint=0.00001;
+int SymDigits=5;
+
+void AZTSelectSymbol(const string name) {
+   Sym=name;
+   SymPoint=SymbolInfoDouble(name,SYMBOL_POINT);
+   if(SymPoint<=0) SymPoint=0.00001;
+   SymDigits=(int)SymbolInfoInteger(name,SYMBOL_DIGITS);
+}
+
 string AZTJsonEscape(const string value) {
    string out="";
    int length=StringLen(value);

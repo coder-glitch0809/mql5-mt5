@@ -20,6 +20,7 @@ int HistoryPending=0, HistorySkipped=0;
 double HistoryTotalR=0, HistoryExpectancyR=0;
 
 double PlanFraction(int part) {
+   if(!UsePartialTP) return part==2 ? 1.0 : 0.0; // whole position runs to TP3
    if(part==0) return TP1ClosePercent/100.0;
    if(part==1) return TP2ClosePercent/100.0;
    return 1.0-(TP1ClosePercent+TP2ClosePercent)/100.0;
@@ -61,7 +62,8 @@ AZTHistoryOutcome SimulatePlan(int side,double entry,double sl,int fromShift,int
             realized+=PlanFraction(stage)*PlanTargetR(stage);
             remaining-=PlanFraction(stage);
             stage++;
-            if(MoveSLAfterTP) stop=stage==1 ? entry : entry+side*risk*PlanTargetR(stage-2);
+            // After TP1 the stop locks BreakevenLockR beyond entry; after TP2 it sits at TP1.
+            if(MoveSLAfterTP) stop=stage==1 ? entry+side*risk*BreakevenLockR : entry+side*risk*PlanTargetR(stage-2);
          }
          if(stage>=3) { resultR=realized; exitShift=i; return AZT_HISTORY_TARGET; }
          if(fromShift-i+1>=maxBars) { exitPrice=Rates[i].close; outcome=AZT_HISTORY_TIME; }
@@ -87,7 +89,7 @@ AZTHistoryOutcome AnalyzeHistoricalSignal(const LocalSignal &signal,int signalSh
    AZTHistoryOutcome outcome=SimulatePlan(signal.side,entry,signal.sl,entryShift,HistoryMaxHoldingBars,resultR,stage,exitShift);
    if(outcome==AZT_HISTORY_PENDING || outcome==AZT_HISTORY_INVALID_ENTRY) { resultR=0; return outcome; }
    if(stage>0) HistoryTP1++;
-   resultR-=HistoryRoundTripCostPoints*_Point/(signal.side*(entry-signal.sl));
+   resultR-=HistoryRoundTripCostPoints*SymPoint/(signal.side*(entry-signal.sl));
    return outcome;
 }
 
@@ -96,7 +98,7 @@ void RunHistoricalAnalysis(bool draw=true) {
    HistoryTargets=0; HistoryStops=0; HistoryTimedExits=0; HistoryTP1=0;
    HistoryPending=0; HistorySkipped=0; HistoryTotalR=0; HistoryExpectancyR=0;
    HistoricalSignals=0;
-   int oldest=MathMax(0,MathMin(HistoryBars,ArraySize(Rates)-RequiredBars()));
+   int oldest=MathMax(0,MathMin(HistoryBars,ArraySize(Rates)-IndicatorBars()));
    int previousSignalShift=-1;
    if(draw) LastSignalBar=0;
    for(int shift=oldest;shift>=1;shift--) {

@@ -9,6 +9,7 @@
 #undef OnTick
 #undef OnTimer
 void OnStart() {
+   AZTSelectSymbol(_Symbol);
    TF=PERIOD_M1; Prefix="AZT_QA_"; ArraySetAsSeries(Rates,true);
    int n=CopyRates(_Symbol,TF,0,160,Rates);
    if(n<100) { Print("IMAGE_QA insufficient cached candles: ",n); return; }

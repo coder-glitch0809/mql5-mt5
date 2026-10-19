@@ -12,6 +12,9 @@ input string InpTelegramConfigFile = "AZT_Config.ini"; // MQL5/Files ichida: tok
 input int InpTelegramTimeoutMs = 2500; // Clamped to 500..3000 ms
 input bool InpTelegramTestOnStart = false; // Explicit opt-in, persisted once
 
+// Six timeframes can close together (e.g. at H4): each verified signal needs a photo and a text.
+#define AZT_TG_QUEUE_MAX 30
+
 struct AZTTelegramItem {
    string key;
    string message;
@@ -177,7 +180,7 @@ bool AZTTelegramQueue(const string stable_key,const string message,const int exp
    if(GlobalVariableCheck(marker)) return false;
    int count=ArraySize(AZTTG_Queue);
    for(int i=0;i<count;i++) if(AZTTG_Queue[i].key==stable_key) return false;
-   if(count>=8) { AZTTG_Status="Queue full; newest signal skipped"; return false; }
+   if(count>=AZT_TG_QUEUE_MAX) { AZTTG_Status="Queue full; newest signal skipped"; return false; }
    ArrayResize(AZTTG_Queue,count+1);
    AZTTG_Queue[count].photo="";
    AZTTG_Queue[count].key=stable_key;
@@ -198,7 +201,7 @@ bool AZTTelegramRequestTest() {
    }
    return AZTTelegramQueue(key,
       "AZT MT5 — TEST XABARI\nTelegram aloqasi ishlayapti.\nBu savdo signali emas; order ochilmaydi.\n"
-      "Manba: MetaTrader 5\n"+_Symbol+" | "+TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS),120);
+      "Manba: MetaTrader 5\n"+Sym+" | "+TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS),120);
 }
 
 bool AZTTelegramInit() {

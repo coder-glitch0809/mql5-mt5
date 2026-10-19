@@ -38,6 +38,7 @@ void BlockFixture() {
    Rates[5].open=103; Rates[5].close=105; Rates[5].high=106; Rates[5].low=101;
 }
 void OnStart() {
+   AZTSelectSymbol(_Symbol);
    int side; string setup,reason; double anchor;
    BlockFixture();
    StructureCheck(!ConfirmedPivot(20,18,true),"pivot cannot confirm before right-hand candles close");
@@ -91,15 +92,16 @@ void OnStart() {
    outcome=AnalyzeHistoricalSignal(signal,5,resultR,exitShift);
    StructureCheck(outcome==AZT_HISTORY_TARGET && MathAbs(resultR-PlanFullR())<0.000001,
       "history enters next bar open and recomputes all 3 targets from actual risk");
-   StructureCheck(MathAbs(PlanFullR()-2.0625)<0.000001,"default plan: 50% @1.5R + 25% @2.25R + 25% @3R = 2.0625R");
+   StructureCheck(MathAbs(PlanFullR()-(UsePartialTP ? 2.0625 : TP3_R))<0.000001,
+      UsePartialTP ? "partial plan: 50% @1.5R + 25% @2.25R + 25% @3R = 2.0625R" : "default plan: whole lot at TP3 = 3R");
    StructureFixture(); Rates[4].high=108; Rates[3].low=99;
    outcome=AnalyzeHistoricalSignal(signal,5,resultR,exitShift);
-   StructureCheck(outcome==AZT_HISTORY_STOP && MathAbs(resultR-0.75)<0.000001 && exitShift==3,
-      "TP1 closes half, then remaining half stops at entry (+0.75R)");
+   StructureCheck(outcome==AZT_HISTORY_STOP && MathAbs(resultR-(UsePartialTP ? 0.75 : 0.0))<0.000001 && exitShift==3,
+      "TP1 reached, then the stop at entry closes the rest (partial +0.75R, whole lot 0R)");
    StructureFixture(); Rates[4].high=112; Rates[3].open=110; Rates[3].high=111; Rates[3].low=99;
    outcome=AnalyzeHistoricalSignal(signal,5,resultR,exitShift);
-   StructureCheck(outcome==AZT_HISTORY_STOP && MathAbs(resultR-1.6875)<0.000001,
-      "TP1+TP2 taken, last quarter stops at TP1 (+1.6875R)");
+   StructureCheck(outcome==AZT_HISTORY_STOP && MathAbs(resultR-(UsePartialTP ? 1.6875 : 1.5))<0.000001,
+      "TP1+TP2 reached, rest stops at TP1 (partial +1.6875R, whole lot +1.5R)");
    StructureFixture(); Rates[4].high=108; Rates[4].low=94;
    outcome=AnalyzeHistoricalSignal(signal,5,resultR,exitShift);
    StructureCheck(outcome==AZT_HISTORY_STOP && MathAbs(resultR+1)<0.000001,

@@ -15,9 +15,10 @@ void AZTImageLevel(long chart,string label,double price,color ink) {
    ObjectSetInteger(chart,text,OBJPROP_COLOR,ink);
    ObjectSetInteger(chart,text,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
 }
-void QueueSignalImage(const LocalSignal &signal,const string key) {
+// accuracy: the "🎯 Aniqlik: ..." line, shown in the caption.
+void QueueSignalImage(const LocalSignal &signal,const string key,const string accuracy="") {
    if(!InpSignalImages || !AZTTelegramReady() || ArraySize(Rates)<3) return;
-   long chart=ChartOpen(_Symbol,TF);
+   long chart=ChartOpen(Sym,TF);
    if(chart==0) { Print("AZT: chart image unavailable"); return; }
    ChartSetInteger(chart,CHART_MODE,CHART_CANDLES);
    ChartSetInteger(chart,CHART_COLOR_BACKGROUND,C'15,18,32');
@@ -44,6 +45,7 @@ void QueueSignalImage(const LocalSignal &signal,const string key) {
    AZTImageLevel(chart,"TP1",signal.tp1,clrLimeGreen);
    AZTImageLevel(chart,"TP2",signal.tp2,clrLimeGreen);
    AZTImageLevel(chart,"TP3",signal.tp3,clrLimeGreen);
+   if(signal.limit>0) AZTImageLevel(chart,signal.side==1 ? "BUY LIMIT" : "SELL LIMIT",signal.limit,clrDeepSkyBlue);
    AZTLevel levels[]; BuildLevels(1,signal.atr,levels);
    for(int i=0;i<MathMin(6,ArraySize(levels));i++)
       AZTImageLevel(chart,"SNR "+(string)levels[i].touches+"x",levels[i].price,clrSlateGray);
@@ -57,7 +59,7 @@ void QueueSignalImage(const LocalSignal &signal,const string key) {
       ObjectSetInteger(chart,name,OBJPROP_WIDTH,2);
       ObjectSetInteger(chart,name,OBJPROP_RAY_RIGHT,ObjectGetInteger(0,name,OBJPROP_RAY_RIGHT));
    }
-   string title=_Symbol+" | "+StringSubstr(EnumToString(TF),7)+" | "+(signal.side==1 ? "BUY" : "SELL")+
+   string title=Sym+" | "+StringSubstr(EnumToString(TF),7)+" | "+(signal.side==1 ? "BUY" : "SELL")+
       " | "+TimeToString(signal.time+PeriodSeconds(TF),TIME_DATE|TIME_SECONDS)+" broker";
    ObjectCreate(chart,"AZT_IMG_TITLE",OBJ_LABEL,0,0,0);
    ObjectSetInteger(chart,"AZT_IMG_TITLE",OBJPROP_XDISTANCE,20);
@@ -78,9 +80,23 @@ void QueueSignalImage(const LocalSignal &signal,const string key) {
    // Synchronous property read drains preceding chart commands before closing.
    ChartGetInteger(chart,CHART_WIDTH_IN_PIXELS);
    ChartClose(chart);
-   string caption="YANGI SIGNAL | "+title+"\nEntry "+Price(signal.entry)+" | SL "+Price(signal.sl)+
-      "\nTP1 "+Price(signal.tp1)+" | TP2 "+Price(signal.tp2)+" | TP3 "+Price(signal.tp3)+
-      "\nSetup: "+signal.setup+" | Konfluens: "+(string)signal.score+"\nBatafsil tahlil keyingi xabarda.";
+   // One value per line, so the caption reads in order on a phone.
+   string caption="🆕 YANGI SIGNAL | "+Sym+" | "+StringSubstr(EnumToString(TF),7)+" | "+(signal.side==1 ? "🟢 BUY" : "🔴 SELL")+
+      "\n"+AssetName(AssetClass())+
+      "\n🕒 "+TimeToString(signal.time+PeriodSeconds(TF),TIME_DATE|TIME_SECONDS)+" broker"+
+      "\n━━━━━━━━━━━━"+
+      "\n▶️ Entry: "+Price(signal.entry)+
+      "\n🛑 SL: "+Price(signal.sl)+
+      "\n🎯 TP1: "+Price(signal.tp1)+
+      "\n🎯 TP2: "+Price(signal.tp2)+
+      "\n🏁 TP3: "+Price(signal.tp3)+
+      (signal.limit>0 ? "\n⏳ "+(signal.side==1 ? "BUY LIMIT: " : "SELL LIMIT: ")+Price(signal.limit)+" (kutiladigan narx)" : "")+
+      "\n━━━━━━━━━━━━"+
+      "\n🧩 Setup: "+signal.setup+
+      "\n📊 Konfluens: "+(string)signal.score+" | 🧠 Strategiya: "+(string)signal.families+"/"+(string)AZT_FAMILIES+
+      (accuracy!="" ? "\n"+accuracy : "")+
+      "\n📄 Batafsil tahlil keyingi xabarda.";
+   caption=AZTTrimTo(caption,1000);
    if(!saved || !AZTTelegramQueuePhoto("img|"+key,caption,file)) { FileDelete(file); Print("AZT: signal image not queued"); }
 }
 #endif

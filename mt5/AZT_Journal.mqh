@@ -24,7 +24,7 @@ struct AZTJournalRow {
 AZTJournalRow Journal[];
 datetime JournalNextReflect=0;
 
-string JournalFile() { return "AZT_Journal_"+_Symbol+"_"+StringSubstr(EnumToString(TF),7)+".csv"; }
+string JournalFile() { return "AZT_Journal_"+Sym+"_"+StringSubstr(EnumToString(TF),7)+".csv"; }
 
 string JournalClean(string value,int limit=300) {
    StringReplace(value,";",","); StringReplace(value,"\n"," "); StringReplace(value,"\r"," ");
@@ -40,7 +40,7 @@ void JournalSave() {
    for(int i=0;i<ArraySize(Journal);i++) {
       AZTJournalRow r=Journal[i];
       FileWrite(file,r.id,(long)r.time,r.side,r.setup,r.context,r.action,
-         DoubleToString(r.entry,_Digits),DoubleToString(r.sl,_Digits),
+         DoubleToString(r.entry,SymDigits),DoubleToString(r.sl,SymDigits),
          r.dec[0],r.conf[0],r.why[0],
          r.outcome,r.stage,DoubleToString(r.resultR,3),DoubleToString(r.mfeR,2),DoubleToString(r.maeR,2),r.reflected);
    }
@@ -84,11 +84,11 @@ void JournalLoad() {
 }
 
 // Each scanned timeframe has its own journal file; load the current one when it is needed.
-// TFIndex/JournalTF live in the EA; in unit tests both stay -1 so nothing is reloaded.
+// CurSlot/JournalSlot live in the EA; in unit tests both stay -1 so nothing is reloaded.
 void EnsureJournal() {
-   if(JournalTF==TFIndex) return;
+   if(JournalSlot==CurSlot) return;
    JournalLoad();
-   JournalTF=TFIndex;
+   JournalSlot=CurSlot;
 }
 
 int JournalFind(const string id) {
@@ -131,7 +131,7 @@ int JournalCorrect(const AZTJournalRow &r,int provider) {
 string OutcomeText(const AZTJournalRow &r) {
    if(r.outcome==0) return "kutilmoqda";
    string stages=r.stage>=3 ? "TP1 ✓ TP2 ✓ TP3 ✓" : r.stage==2 ? "TP1 ✓ TP2 ✓, qolgani TP1 da yopildi" :
-                 r.stage==1 ? "TP1 ✓, qolgani zararsiz (entry) da yopildi" : r.outcome==-1 ? "SL urildi" : "vaqt tugadi";
+                 r.stage==1 ? "TP1 ✓, qolgani zararsiz yopildi" : r.outcome==-1 ? "SL urildi" : "vaqt tugadi";
    return stages+" → "+(r.resultR>=0 ? "+" : "")+DoubleToString(r.resultR,2)+"R";
 }
 
@@ -173,11 +173,22 @@ string JournalMemory(int provider,int newest=15) {
       if(c==0) continue;
       lines="\n- "+TimeToString(r.time,TIME_DATE|TIME_MINUTES)+" "+(r.side==1 ? "BUY" : "SELL")+" "+r.setup+
             " | "+r.context+" | you said "+(r.dec[provider]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[provider]+
-            "% | result: "+(r.outcome==1 ? "reached 1.5R" : "hit SL first")+" | "+(c>0 ? "RIGHT" : "WRONG")+lines;
+            "% | result: "+(r.outcome==1 ? "reached TP1 ("+DoubleToString(TP1_R,2)+"R)" : "hit SL first")+" | "+(c>0 ? "RIGHT" : "WRONG")+lines;
       shown++;
    }
-   string text="\n\nYOUR OWN TRACK RECORD ("+AZTAIName(provider)+") on "+_Symbol+" "+EnumToString(TF)+": "+
+   // Signals sent while Claude was unavailable: their results are Claude's experience too.
+   string rules="";
+   int rulesShown=0;
+   for(int i=ArraySize(Journal)-1;i>=0 && rulesShown<10;i--) {
+      if(Journal[i].dec[provider]!=0 || (Journal[i].outcome!=1 && Journal[i].outcome!=-1)) continue;
+      AZTJournalRow r=Journal[i];
+      rules="\n- "+TimeToString(r.time,TIME_DATE|TIME_MINUTES)+" "+(r.side==1 ? "BUY" : "SELL")+" "+r.setup+" | "+r.context+
+            " | result: "+(r.outcome==1 ? "reached TP1" : "hit SL first")+rules;
+      rulesShown++;
+   }
+   string text="\n\nYOUR OWN TRACK RECORD ("+AZTAIName(provider)+") on "+Sym+" "+EnumToString(TF)+": "+
                JournalScore(provider)+(lines=="" ? "" : lines);
+   if(rules!="") text+="\n\nSIGNALS THE EA SENT WITHOUT YOUR REVIEW (you were unavailable) AND THEIR RESULTS:"+rules;
    string lessons=AZTLessonsText(provider);
    if(lessons!="") text+="\n\nLESSONS YOU WROTE AFTER YOUR PAST MISTAKES (apply them):"+lessons;
    return text;
@@ -190,7 +201,7 @@ int JournalResolve(int &resolved[]) {
    bool changed=false;
    for(int i=0;i<ArraySize(Journal);i++) {
       if(Journal[i].outcome!=0) continue;
-      int shift=iBarShift(_Symbol,TF,Journal[i].time,true);
+      int shift=iBarShift(Sym,TF,Journal[i].time,true);
       if(shift<0 || shift>=ArraySize(Rates)) { Journal[i].outcome=2; changed=true; continue; }
       if(shift<2) continue;
       double resultR; int stage, exitShift;
@@ -215,10 +226,13 @@ int JournalResolve(int &resolved[]) {
 
 string JournalResultText(int i) {
    AZTJournalRow r=Journal[i];
-   string text="📘 SIGNAL NATIJASI | "+_Symbol+" "+EnumToString(TF)+"\n"+(r.side==1 ? "BUY" : "SELL")+" | "+r.setup+
-      " | "+TimeToString(r.time)+"\n"+OutcomeText(r)+" (reja bo'yicha, shamlar asosida)"+
-      "\nEng yaxshi harakat: +"+DoubleToString(r.mfeR,2)+"R | eng yomon: -"+DoubleToString(r.maeR,2)+"R"+
-      "\nQaror: "+r.action;
+   string text="📘 SIGNAL NATIJASI | "+Sym+" | "+StringSubstr(EnumToString(TF),7)+" | "+(r.side==1 ? "🟢 BUY" : "🔴 SELL")+
+      "\n🧩 Setup: "+r.setup+
+      "\n🕒 "+TimeToString(r.time)+
+      "\n"+(r.outcome==1 ? "✅ " : r.outcome==-1 ? "🛑 " : "⏹ ")+OutcomeText(r)+" (reja bo'yicha, shamlar asosida)"+
+      "\n📈 Eng yaxshi harakat: +"+DoubleToString(r.mfeR,2)+"R"+
+      "\n📉 Eng yomon: -"+DoubleToString(r.maeR,2)+"R"+
+      "\n📋 Qaror: "+r.action;
    for(int p=0;p<AZT_AI_COUNT;p++) {
       if(r.dec[p]==0) continue;
       int c=JournalCorrect(r,p);
@@ -229,28 +243,37 @@ string JournalResultText(int i) {
    return text;
 }
 
-// One lesson per call (rate-limited): the wrong AI explains its own mistake.
+// One lesson per call (rate-limited): the wrong AI explains its own mistake, and losing signals
+// the EA sent while Claude was unavailable become lessons once Claude answers again (30-day backlog).
 void JournalReflectOne() {
    if(!InpAILearnFromMistakes || AZTAITester() || TimeLocal()<JournalNextReflect) return;
    EnsureJournal();
    for(int i=ArraySize(Journal)-1;i>=0;i--) {
       if(Journal[i].outcome!=1 && Journal[i].outcome!=-1) continue;
-      if(TimeCurrent()-Journal[i].time>7*86400) break; // old backlog is skipped
+      if(TimeCurrent()-Journal[i].time>30*86400) break; // older backlog is skipped
       for(int p=0;p<AZT_AI_COUNT;p++) {
-         if((Journal[i].reflected & (1<<p))!=0 || JournalCorrect(Journal[i],p)>=0 || !AZTAIHasKey(p)) continue;
+         if((Journal[i].reflected & (1<<p))!=0 || !AZTAIHasKey(p)) continue;
+         bool rulesLoss=Journal[i].dec[p]==0 && Journal[i].outcome==-1;
+         if(JournalCorrect(Journal[i],p)>=0 && !rulesLoss) continue;
          JournalNextReflect=TimeLocal()+60;
          AZTJournalRow r=Journal[i];
-         string facts=_Symbol+" "+EnumToString(TF)+" "+TimeToString(r.time)+" "+(r.side==1 ? "BUY" : "SELL")+
-            " setup: "+r.setup+"\nEntry "+DoubleToString(r.entry,_Digits)+" SL "+DoubleToString(r.sl,_Digits)+
+         string facts=Sym+" "+EnumToString(TF)+" "+TimeToString(r.time)+" "+(r.side==1 ? "BUY" : "SELL")+
+            " setup: "+r.setup+"\nEntry "+DoubleToString(r.entry,SymDigits)+" SL "+DoubleToString(r.sl,SymDigits)+
             "\nContext at signal: "+r.context+
-            "\nYou answered: "+(r.dec[p]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[p]+"% because: "+r.why[p]+
-            "\nWhat really happened: "+(r.outcome==1 ? "price reached 1.5R before the stop" : "the stop was hit before 1.5R")+
+            (rulesLoss ? "\nYou did not review it (API unavailable); the EA sent it on rule checks alone."
+                       : "\nYou answered: "+(r.dec[p]==1 ? "APPROVE" : "REJECT")+" "+(string)r.conf[p]+"% because: "+r.why[p])+
+            "\nWhat really happened: "+(r.outcome==1 ? "price reached TP1 ("+DoubleToString(TP1_R,2)+"R) before the stop" : "the stop was hit before TP1")+
             "; best move +"+DoubleToString(r.mfeR,2)+"R, worst -"+DoubleToString(r.maeR,2)+"R.";
          string lesson;
-         bool ok=AZTAIReflect(p,facts,lesson);
-         Journal[i].reflected|=(1<<p); // one attempt only: never loop on a failing API
+         if(!AZTAIReflect(p,facts,lesson,rulesLoss)) {
+            // API still down (no credit, network): keep the row and try again in 30 minutes.
+            JournalNextReflect=TimeLocal()+1800;
+            Print("AZT: ",AZTAIName(p)," could not write a lesson yet; retry in 30 min");
+            return;
+         }
+         Journal[i].reflected|=(1<<p);
          JournalSave();
-         Print("AZT: ",AZTAIName(p),ok ? " lesson: "+lesson : " could not write a lesson");
+         Print("AZT: ",AZTAIName(p)," lesson: ",lesson);
          return;
       }
    }

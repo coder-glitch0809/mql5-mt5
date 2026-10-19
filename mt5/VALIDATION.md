@@ -17,6 +17,41 @@ chart image only for verified signals; heartbeat/start messages; AI-failure warn
 `AZT_SIGNALS_ONLY`; `AZT_signals_v5.csv` export with the AI verdict; Install-MT5.ps1 compiles instead
 of shipping a prebuilt .ex5.
 
+Fixes after 5.00 review (not compiled yet either; compile and run the tests as above):
+- MTF filter: when higher timeframes exist but none has data yet, the signal is blocked instead of passing unchecked
+  (new check in `test_mt5_signals`).
+- Timeframes are scanned highest first, so slow Claude calls cannot make H4/D1 signals "late".
+- Telegram queue holds 30 items (was 8): several timeframes closing together no longer drop signals.
+- Auto orders: if the new position is not yet visible, the trade result is used so TP1/TP2 management still runs.
+- Closed-trade report waits for the exit deal in history (no false "SAVDO YOPILDI" after a reconnect).
+- `AZT_signals_v5.csv` is written as UTF-8; Claude prompt, journal memory and lessons use the configured TP R values.
+- Failed OnInit no longer leaves stale indicator handles for OnDeinit.
+
+EA 5.20 (not compiled yet; compile and run the tests as above):
+- One EA instance scans every Market Watch symbol (`ScanSymbols`, `MaxSymbols`) on `M1,M5,M15,M30,H1,H4,D1,W1`.
+  Code uses `Sym`/`SymPoint`/`SymDigits` (AZT_Json.mqh) instead of `_Symbol`/`_Point`/`_Digits`; state is per
+  slot = symbol x timeframe (`SwitchSlot`). Tests call `AZTSelectSymbol(_Symbol)` first.
+- First history load is throttled to 4 slots per scan; the rule replay refreshes every `HistoryRefreshBars` candles.
+- `EntryMode` market / limit / both; BUY/SELL LIMIT at the zone with its own targets, cancelled after
+  `LimitExpiryBars`; `MaxOpenPositions` 10, `MaxPendingOrders` 10. Position records are scoped by magic only.
+- Accuracy %: TP1 hit rate of the rules on that symbol/TF (averaged with Claude's confidence); `MinAccuracyPercent` gate.
+- Default exit back to partial TP1 (50%) with the stop locked at entry + `BreakevenLockR` (0.1R).
+- Asset class (forex, crypto, index, stock, bond, commodity) from the symbol path; London/NY session filter only for FX/metals.
+- Telegram photo caption: one value per line with emojis.
+
+EA 5.10 (not compiled yet; compile and run the tests as above):
+- New `AZT_Strategies.mqh`, which `Install-MT5.ps1` now copies too. It adds SMC/ICT liquidity sweeps and
+  premium/discount, range breakouts, morning/evening star, inside bar, three soldiers/crows, HH/HL structure,
+  Stochastic, ADX, tick-volume spikes and a volatility-regime filter.
+- `StrategyGates` (called from `StrictChecks`, so live signals and the history replay both use it) applies the
+  London/New York session filter on M5/M15, a spread/SL cost limit and a sniper limit on how far price is from the
+  zone. It then requires `MinFamilies` (default 5) of the 11 strategy families to confirm.
+- Live quant gate: no signal when this timeframe's replay has `MinHistorySamples`+ results and expectancy
+  < `MinHistoryExpectancyR`.
+- `UsePartialTP=false` (default): the whole lot runs to TP3 = 3R (1:3) and the stop trails to entry/TP1.
+  `test_mt5_structure_history` expectations now depend on this input.
+- Defaults tightened: RSI 50–65 / 35–50, `MTFMinAgreePercent` 67.
+
 ---
 
 Current revision: Claude-only. Earlier runtime results below predate this change.

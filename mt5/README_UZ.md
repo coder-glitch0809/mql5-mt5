@@ -5,6 +5,32 @@ kerak emas. EA o'zi signal topadi, uni barcha qoidalar va yuqori
 timeframe'lar bilan tekshiradi, Claude'ga tekshirtiradi va **faqat hamma
 tekshiruvdan o'tgan** signalni Telegram'ga yuboradi.
 
+## 0b. Versiya 5.20: barcha symbollar, M1–W1, limit orderlar, aniqlik %
+
+| | |
+|---|---|
+| **Bitta chart — barcha symbollar** | EA'ni **bitta** chartga qo'ying: u Market Watch'dagi barcha symbollarni (forex, kripto, indeks, aksiya, obligatsiya, metall/tovar — broker bergan hammasi) o'zi skanerlaydi. `ScanSymbols` bo'sh = Market Watch; yoki `EURUSD,XAUUSD,BTCUSD,US30`. `MaxSymbols` (standart 12) — har symbol × TF alohida indikator yuklaydi, kompyuter kuchiga qarab oshiring. Boshqa chartlardagi eski EA'larni olib tashlang. |
+| **M1 dan W1 gacha** | `ScanTimeframes = M1,M5,M15,M30,H1,H4,D1,W1`: qisqa (skalp) va uzoq muddatli signallar. |
+| **Aniqlik %** | Har signalda `🎯 Aniqlik: 64% (tarixda TP1 ga 58% (40 ta) • Claude 70% • strategiya 6/11)`. Tarixiy qism — xuddi shu qoidalar shu symbol/TF tarixida TP1 ga necha foiz yetgani. `MinAccuracyPercent` (standart 50%) dan past bo'lsa signal yuborilmaydi. |
+| **BUY LIMIT / SELL LIMIT** | `EntryMode = AZT_ENTRY_BOTH`: savdo rejimida bozor narxida order + zonada limit order (kutiladigan narx signalda ko'rsatiladi). `LimitExpiryBars` (12) sham ichida ochilmasa EA uni bekor qiladi. Diqqat: ikkalasi ochilsa, risk ikki baravar (har biri `MaxRiskPercent`). |
+| **10 ta pozitsiya + 10 ta limit** | `MaxOpenPositions=10`, `MaxPendingOrders=10`. |
+| **TP1 foydasi saqlanadi** | Standart `UsePartialTP=true`: TP1 (1.5R) da **50% yopiladi**, SL **Entry + 0.1R** ga ko'chadi (`BreakevenLockR`) — narx qaytsa ham qolgan qism zararsiz yopiladi, TP1 foydasi yo'qolmaydi. TP2 da yana 25%, SL → TP1. Eng yomon holatda TP1 dan keyin ≈ +0.8R. |
+| **Tartibli xabar** | Rasm ostidagi matn har qiymat alohida qatorda, stikerlar bilan (▶️ Entry, 🛑 SL, 🎯 TP1/TP2, 🏁 TP3, ⏳ LIMIT, 🎯 Aniqlik). |
+| **TradingView** | EA TradingView'dan ma'lumot olmaydi: TradingView'da ochiq API yo'q va sahifani avtomatik o'qish ularning qoidalariga zid. Tahlil MT5 ichidagi brokeringiz kotirovkalari bilan qilinadi (tekshirish shu narxlarda bo'ladi). |
+
+## 0a. Versiya 5.10: 11 strategiya oilasi va 1:3
+
+| | |
+|---|---|
+| **11 strategiya oilasi** | Har signal 11 ta mustaqil yondashuv bilan tekshiriladi: **S/R (SNR)**, **SMC/ICT** (order blok, BOS/CHOCH, FVG, likvidlik sweep, premium/discount, Fibonacci OTE), **grafik patternlar** (double top/bottom, konsolidatsiya/flag breakout), **yapon shamlari** (engulfing, pin bar, morning/evening star, inside bar, three soldiers/crows), **price action** (HH/HL yoki LH/LL, trend chizig'i, yuqori TF trendi), **indikatorlar** (EMA, RSI, MACD, MA200, Stochastic, ADX), **hajm** (tick volume o'sishi), **sessiya** (London/New York), **kvant** (volatillik rejimi, shu TF tarixidagi o'rtacha natija), **skalping** (M5/M15 da spread SL ga nisbatan kichik), **snayper** (narx kirish zonasidan uzoqlashmagan). |
+| **Qanday birlashtiriladi** | Kamida `MinFamilies` (standart **5**) oila tasdiqlashi kerak. Bitta ham oila qarshi bo'lsa (masalan Stochastic overbought, ADX teskari, LH/LL tuzilma, volatillik spike) signal chiqmaydi. |
+| **Qo'shimcha filtrlar** | M5/M15 signallari faqat London/New York sessiyasida (GMT 7–20). Spread SL ning 10% idan katta bo'lsa signal yo'q. Narx zonadan 1 ATR dan ko'p qochgan bo'lsa (quvib kirish) signal yo'q. Shu TF tarixida qoidalar o'rtacha zarar bergan bo'lsa jonli signal yo'q. RSI chegarasi 65/35 ga torroq (haddan oshgan bozorga kirmaydi). Yuqori TF'larning kamida 67% i mos bo'lishi kerak. |
+| **1% risk : 3% foyda** | Standart: `UsePartialTP=false` — **butun lot TP3 = 3R gacha** turadi. 1.5R da SL Entry'ga, 2.25R da SL TP1 ga ko'chadi. Natijalar: SL → **−1R (−1%)**, Entry'da yopilsa → **0**, TP1 da yopilsa → **+1.5R**, TP3 → **+3R (+3%)**. Eski 50/25/25 rejim: `UsePartialTP=true`. |
+
+**Halol ogohlantirish:** filtrlar ko'p bo'lgani uchun signallar ancha kamayadi. Bu ataylab qilingan: kam, lekin sifatliroq
+signal. Lekin hech qaysi strategiya foydani kafolatlamaydi. 1:3 da foyda uchun signallarning taxminan 25% dan ko'pi
+TP3 ga yetishi kerak. Avval demo hisobda kamida 2–4 hafta sinang.
+
 ## 0. Versiya 5 da nima yangi
 
 | | |
@@ -15,7 +41,7 @@ tekshiruvdan o'tgan** signalni Telegram'ga yuboradi.
 | **Claude tekshiruvi majburiy** | Signal Telegram'ga faqat Claude `APPROVE` va ishonch ≥ 70% bo'lsa boradi (`RequireAIApproval`, `MinAIConfidence`). Rad etilganlari yuborilmaydi, lekin natijasi kuzatilib, Claude xotirasiga yoziladi. Rasm ham faqat tasdiqlangan signalga. |
 | **Standart rejim** | `AZT_SIGNALS_ONLY`: faqat signal, savdo ochilmaydi. Savdo kerak bo'lsa `TradeMode` ni o'zgartiring (4-bo'lim). |
 | **"EA ishlayapti" xabari** | Ishga tushganda va har 6 soatda (`HeartbeatHours`) Telegram'ga holat: har bir TF tayyormi, hozirgi trendlar, nechta setup topildi / yuborildi / Claude o'tkazmadi. |
-| **Claude ishlamasa** | Telegram'ga soatiga bir marta ogohlantirish keladi; tekshirilmagan signal yuborilmaydi. |
+| **Claude ishlamasa** | (Kredit tugagan, internet yo'q.) `SendWhenAIUnavailable=true` (standart): signallar **11 strategiya + yuqori TF + tarixiy aniqlik** tekshiruvi bilan yuborilaveradi, xabarda "⚠️ Claude hozir ishlamayapti" deb yoziladi. Soatiga bir marta ogohlantirish keladi. Hisob to'ldirilgach Claude shu signallarning natijalarini xotirasida ko'radi va SL ga urilganlaridan (oxirgi 30 kun) o'ziga saboq yozadi — keyingi signallarni shu tajriba bilan tekshiradi. Claude **rad etgan** signal baribir yuborilmaydi. |
 | **Ali bilan ulanish** | Har bir signal `MQL5\Files\AZT_signals_v5.csv` ga yoziladi (Claude qarori bilan). Ali'ning Treyder agenti uni o'qiydi. |
 
 **Muhim:** EA'ni har bir symbol uchun **bitta** chartga qo'ying (EURUSD, XAUUSD...). Bir symbolni bir nechta
@@ -25,7 +51,7 @@ TF chartga qo'ymang — endi bitta chart barcha TF'larni o'zi ko'radi, aks holda
 
 | Fayl | MT5 ichidagi joyi | Nima uchun |
 |---|---|---|
-| `AI_Zone_Trader_EA.mq5` + 8 ta `AZT_*.mqh` (o'rnatishda `AI_Zone_Trader_EA.ex5` ga kompilyatsiya qilinadi) | `MQL5\Experts\AI_Zone_Trader\` | Robotning o'zi |
+| `AI_Zone_Trader_EA.mq5` + 9 ta `AZT_*.mqh` (o'rnatishda `AI_Zone_Trader_EA.ex5` ga kompilyatsiya qilinadi) | `MQL5\Experts\AI_Zone_Trader\` | Robotning o'zi |
 | `AZT_Config.ini` | `MQL5\Files\` | **Barcha kalitlar shu yerda:** Telegram token, chat ID, Claude API kalitlari |
 
 Boshqa hech narsa kerak emas. Buni `Install-MT5.ps1` avtomatik qiladi (MT5 ning o'z MetaEditor'i bilan
@@ -92,6 +118,9 @@ EA inputlarida kalit kiritiladigan joy **yo'q** — chalkashlik bo'lmasligi uchu
 
 ## 5. Stop Loss va 3 qismli Take Profit
 
+> 5.10 dan standart: **butun lot TP3 (1:3) gacha**, qismlab yopilmaydi (0a-bo'lim). Quyidagi jadval
+> `UsePartialTP=true` rejimi uchun.
+
 Misol: BUY, Entry 1.08500, SL 1.08300 (risk = 200 pt = 20 pips = **1R**).
 
 | Daraja | Narx | Nima bo'ladi |
@@ -157,12 +186,14 @@ ketma-ket SL bo'lishi normal holat.
 Har bir TF uchun alohida, faqat yopilgan sham. Signal yuborilishi uchun **hammasi** bajarilishi kerak:
 1. Asosiy qoida (pastda) va konfluens bali ≥ `MinConfluence`;
 2. Konfluensda qarshi ⚠️ omil yo'q (`RequireAllChecks`);
-3. Yuqori TF'lar qarshi emas va kamida 50%i mos (`MTFFilter`);
-4. Claude `APPROVE`, ishonch ≥ 70% (`RequireAIApproval`).
+3. Yuqori TF'lar qarshi emas va kamida 67%i mos (`MTFFilter`);
+4. Sessiya, spread va snayper filtrlari, kamida `MinFamilies` strategiya oilasi (0a-bo'lim);
+5. Shu TF tarixida qoidalar o'rtacha zarar bermagan (`MinHistoryExpectancyR`);
+6. Claude `APPROVE`, ishonch ≥ 70% (`RequireAIApproval`).
 
-Tarixiy statistika (panel "History") ham 1–3 qoidalar bilan hisoblanadi.
- Trend: EMA21 > EMA55 va narx EMA21 ustida (BUY), RSI 50–70;
-SELL uchun teskari, RSI 30–50. Kirish turlari: yangi order blokdan qaytish,
+Tarixiy statistika (panel "History") ham 1–4 qoidalar bilan hisoblanadi.
+ Trend: EMA21 > EMA55 va narx EMA21 ustida (BUY), RSI 50–65;
+SELL uchun teskari, RSI 35–50. Kirish turlari: yangi order blokdan qaytish,
 BOS/CHOCH impulsi, trend chizig'idan qaytish, EMA kesishishi yoki EMA'ga qaytish.
 Grafikda order bloklar, trend chiziqlari, BOS/CHOCH belgilari va Entry/SL/TP
 chiziqlari chiziladi. Tarixiy signallar faqat statistikaga kiradi, order ochmaydi.
