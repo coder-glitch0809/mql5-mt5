@@ -1,25 +1,81 @@
-﻿AI Zone Trader - Windows VPS ga o'rnatish
-==========================================
+﻿AI Zone Trader 5.20 - Windows VPS ga o'rnatish
+===============================================
 
-1. VPS ga MetaTrader 5 o'rnating, broker hisobingizga kiring, MT5 ni bir marta yoping.
-2. Shu papkani (AI_Zone_Trader_MT5) VPS ga ko'chiring, masalan C:\AI_Zone_Trader_MT5
-3. Kompyuteringizdagi AZT_Config.ini faylini SHU papkaga qo'ying (kalitlar ichida).
+Nima uchun VPS: EA faqat MetaTrader 5 ichida ishlaydi. VPS - internetdagi doim yoqilgan
+Windows kompyuter. Kompyuteringiz o'chiq bo'lsa ham signallar Telegram'ga uzilmay keladi.
+(Vercel kabi xizmatlar MT5 ni ishlata olmaydi.)
+
+VPS tanlash
+-----------
+- Windows Server, kamida 4 GB RAM, 2 CPU (EA 12 symbol x 8 timeframe ni skanerlaydi).
+  Kamroq RAM bo'lsa EA inputlarida MaxSymbols ni kamaytiring (masalan 6).
+- Joylashuv: brokeringiz serveriga yaqin (odatda London yoki New York).
+- Brokeringizda bepul VPS bo'lishi mumkin - shaxsiy kabinetni tekshiring.
+
+1. VPS ga ulaning
+-----------------
+   Windows: Start > "Remote Desktop Connection" > VPS IP manzili, login, parol.
+   Telefon: "Microsoft Remote Desktop" (Windows App) ilovasi.
+
+2. MetaTrader 5
+---------------
+   VPS da brokeringiz saytidan MT5 ni yuklab o'rnating, hisobingizga kiring.
+   Market Watch'da kerakli symbollarni ko'rsating (o'ng tugma > Show All yoki kerakli
+   symbollarni qo'shing). EA shu ro'yxatdagi symbollarni skanerlaydi.
+   MT5 ni bir marta yoping.
+
+3. EA fayllari
+--------------
+   Loyiha papkasini VPS ga ko'chiring, masalan C:\AI_Zone_Trader_MT5
+   (Remote Desktop'da nusxalash/joylashtirish ishlaydi yoki GitHub'dan ZIP yuklab oling).
+   Kompyuteringizdagi AZT_Config.ini faylini mt5 papkasiga qo'ying (ichida Telegram token,
+   chat ID va Claude API kaliti bor).
    Kompyuterdagi joyi: MT5 > File > Open Data Folder > MQL5 > Files > AZT_Config.ini
-4. Papkada PowerShell oching va bajaring:
+
+4. O'rnatish va kompilyatsiya
+-----------------------------
+   mt5 papkasida PowerShell oching va bajaring:
       powershell -ExecutionPolicy Bypass -File .\Install-MT5.ps1
-   Natijada 4 ta kalit "filled" deb chiqishi kerak.
+   "Compiled:" qatori chiqishi kerak. "COMPILE FAILED" chiqsa: MetaEditor'da
+   AI_Zone_Trader_EA.mq5 ni ochib F7 bosing, xato matnini dasturchiga yuboring.
    Keyin AZT_Config.ini ni shu papkadan o'chiring (u endi MT5 ichida).
-5. MT5 ni oching: Tools > Options > Expert Advisors
+
+5. MT5 sozlamasi
+----------------
+   MT5 ni oching: Tools > Options > Expert Advisors
       [x] Allow algorithmic trading
       [x] Allow WebRequest for listed URL:
             https://api.telegram.org
             https://api.anthropic.com
-         
-6. Navigator > Expert Advisors > Refresh > AI_Zone_Trader > AI_Zone_Trader_EA ni
-   chartga torting (masalan EURUSD, istalgan TF). Inputs: Reset.
-   Bitta chart M5..D1 hammasini skanerlaydi - har symbol uchun bitta chart yetarli.
-   Standart TradeMode = AZT_SIGNALS_ONLY (faqat Claude tekshirgan signal, savdo yo'q).
-   Tepadagi "Algo Trading" yashil bo'lsin.
-   Install-MT5.ps1 "Compiled:" deb yozmagan bo'lsa: MetaEditor'da AI_Zone_Trader_EA.mq5 ni ochib F7 bosing.
-7. Chartdagi "Telegram TEST (tugmali)" va "AI TEST" tugmalarini bosing.
-8. Kompyuteringizdagi MT5 dan EA ni olib tashlang - faqat bitta joyda ishlasin.
+
+6. EA ni ishga tushirish - FAQAT BITTA CHART
+--------------------------------------------
+   Navigator > Expert Advisors > Refresh > AI_Zone_Trader > AI_Zone_Trader_EA ni
+   BITTA chartga torting (masalan EURUSD, istalgan TF). Inputs: Reset.
+   Bu bitta chart Market Watch'dagi barcha symbollarni (ScanSymbols bo'sh) M1..W1 da
+   o'zi skanerlaydi. Boshqa chartlarga EA qo'ymang - signallar takrorlanadi.
+   Standart: TradeMode = AZT_SIGNALS_ONLY (faqat signal, savdo ochilmaydi).
+   Tepadagi "Algo Trading" tugmasi yashil bo'lsin.
+   Birinchi ishga tushishda tarix yuklanadi: barcha symbollar tayyor bo'lishi bir necha
+   daqiqa oladi, keyin Telegram'ga "🟢 EA ISHGA TUSHDI" xabari keladi.
+
+7. Tekshirish
+-------------
+   Chartdagi "Telegram TEST (tugmali)" va "AI TEST" tugmalarini bosing.
+   Claude hisobida kredit bo'lmasa ham signallar 11 strategiya tekshiruvi bilan keladi
+   (SendWhenAIUnavailable = true).
+
+8. Kompyuteringizdagi EA ni o'chiring
+-------------------------------------
+   Kompyuteringizdagi MT5 dan EA ni olib tashlang - EA faqat VPS da ishlasin.
+   Ikkalasi birga ishlasa signallar ikki marta keladi, savdo rejimida orderlar ham
+   ikki marta ochiladi.
+
+Muhim
+-----
+- Remote Desktop oynasini yopsangiz ham MT5 ishlayveradi. Faqat VPS ichida MT5 ni
+  yopmang va VPS dan "Sign out" qilmang - oynani shunchaki X bilan yoping.
+- VPS qayta yuklansa (Windows yangilanishi): MT5 ni qayta oching, EA chartda qoladi.
+  Avtomatik ochilishi uchun MT5 yorlig'ini shu papkaga qo'ying:
+     Win+R > shell:startup
+- EA yangi versiyasi chiqsa: 3-4 qadamlarni takrorlang, MT5 ni qayta ishga tushiring.
