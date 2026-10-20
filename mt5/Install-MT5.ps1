@@ -138,5 +138,5 @@ foreach ($key in @('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','CLAUDE_API_KEY')) {
 Write-Output "Old copies moved: $backup"
 Write-Output 'Next in MT5: Tools > Options > Expert Advisors > Allow WebRequest for:'
 Write-Output '  https://api.telegram.org   https://api.anthropic.com'
-Write-Output 'Then: Navigator > Expert Advisors > Refresh > AI_Zone_Trader > AI_Zone_Trader_EA onto ONE chart per symbol.'
-Write-Output 'One chart scans M5, M15, M30, H1, H4 and D1 (input ScanTimeframes).'
+Write-Output 'Then: Navigator > Expert Advisors > Refresh > AI_Zone_Trader > AI_Zone_Trader_EA onto ONE chart only.'
+Write-Output 'That chart scans every Market Watch symbol on M1..W1 (inputs ScanSymbols, ScanTimeframes). Remove the EA from other charts.'
